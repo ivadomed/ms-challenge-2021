@@ -5,8 +5,7 @@ import argparse
 
 # Argument parsing
 parser = argparse.ArgumentParser(
-    description="""Preprocess data for the Longitudinal MS Lesion Segmentation Challenge of MICCAI 2021 with the anima library. 
-                    The preprocessing consists in a brain extraction followed by a bias field correction.""", formatter_class=argparse.RawTextHelpFormatter)
+    description="""Quality control for brain extraction preprocessing step.""", formatter_class=argparse.RawTextHelpFormatter)
 
 parser.add_argument('-s', '--source', type=str, required=True, help="""Input folder containing the data before ANIMA preprocessing.
 The folder must follow this structure:
