@@ -2,7 +2,7 @@
 MS segmentation challenge
 
 
-## BIDSfictation
+## BIDSification
 In order to curate the LongitudinalMultipleSclerosisLesionSegmentationChallengeMiccai21 dataset run:
 
 ```
