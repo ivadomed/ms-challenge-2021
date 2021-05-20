@@ -21,9 +21,14 @@ def main(root_data):
         shutil.rmtree(output_data)
     os.makedirs(output_data)
 
+    # Path for raw images:
+    # /sub-XXX/anat/sub-XXX_acq-middlespace_run-time0X_FLAIR.nii.gz
     dict_images = { "flair_time01_on_middle_space.nii.gz":"_acq-middlespace_run-time01_FLAIR.nii.gz",
                     "flair_time02_on_middle_space.nii.gz":"_acq-middlespace_run-time02_FLAIR.nii.gz",
                   }
+    # Path for derivative images:
+    # /derivatives/labels/sub-XXX/anat/sub-XXX_acq-expertX_groundtruth.nii.gz
+    # /derivatives/labels/sub-XXX/anat/sub-XXX_groundtruth.nii.gz
     dict_der =  {   "ground_truth_expert1.nii.gz":"_acq-expert1_groundtruth.nii.gz",
                     "ground_truth_expert2.nii.gz":"_acq-expert2_groundtruth.nii.gz",
                     "ground_truth_expert3.nii.gz":"_acq-expert3_groundtruth.nii.gz",
