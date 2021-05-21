@@ -76,8 +76,8 @@ def main(root_data):
     for subject in sub_list:
         row_sub = []
         row_sub.append(subject)
-        row_sub.append('-')
-        row_sub.append('-')
+        row_sub.append('n/a')
+        row_sub.append('n/a')
         participants.append(row_sub)
 
     print (participants)
