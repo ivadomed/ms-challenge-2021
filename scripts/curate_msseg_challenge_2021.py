@@ -27,13 +27,13 @@ def main(root_data):
                     "flair_time02_on_middle_space.nii.gz":"_acq-middlespace_run-time02_FLAIR.nii.gz",
                   }
     # Path for derivative images:
-    # /derivatives/labels/sub-XXX/anat/sub-XXX_acq-expertX_groundtruth.nii.gz
-    # /derivatives/labels/sub-XXX/anat/sub-XXX_groundtruth.nii.gz
-    dict_der =  {   "ground_truth_expert1.nii.gz":"_acq-expert1_groundtruth.nii.gz",
-                    "ground_truth_expert2.nii.gz":"_acq-expert2_groundtruth.nii.gz",
-                    "ground_truth_expert3.nii.gz":"_acq-expert3_groundtruth.nii.gz",
-                    "ground_truth_expert4.nii.gz":"_acq-expert4_groundtruth.nii.gz",
-                    "ground_truth.nii.gz":"_groundtruth.nii.gz"
+    # /derivatives/labels/sub-XXX/anat/sub-XXX_acq-expertX_lesion-manual.nii.gz
+    # /derivatives/labels/sub-XXX/anat/sub-XXX_seg-lesion.nii.gz
+    dict_der =  {   "ground_truth_expert1.nii.gz":"_acq-expert1_lesion-manual.nii.gz",
+                    "ground_truth_expert2.nii.gz":"_acq-expert2_lesion-manual.nii.gz",
+                    "ground_truth_expert3.nii.gz":"_acq-expert3_lesion-manual.nii.gz",
+                    "ground_truth_expert4.nii.gz":"_acq-expert4_lesion-manual.nii.gz",
+                    "ground_truth.nii.gz":"_seg-lesion.nii.gz"
                  }
 
     for sub in os.listdir(root_data):
