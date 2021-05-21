@@ -22,9 +22,9 @@ def main(root_data):
     os.makedirs(output_data)
 
     # Path for raw images:
-    # /sub-XXX/anat/sub-XXX_acq-middlespace_run-time0X_FLAIR.nii.gz
-    dict_images = { "flair_time01_on_middle_space.nii.gz":"_acq-middlespace_run-time01_FLAIR.nii.gz",
-                    "flair_time02_on_middle_space.nii.gz":"_acq-middlespace_run-time02_FLAIR.nii.gz",
+    # /sub-XXX/anat/sub-XXX_ses-0X_acq-middlespace_FLAIR.nii.gz
+    dict_images = { "flair_time01_on_middle_space.nii.gz":"_ses-01_acq-middlespace_FLAIR.nii.gz",
+                    "flair_time02_on_middle_space.nii.gz":"_ses-02_acq-middlespace_FLAIR.nii.gz",
                   }
     # Path for derivative images:
     # /derivatives/labels/sub-XXX/anat/sub-XXX_acq-expertX_lesion-manual.nii.gz
