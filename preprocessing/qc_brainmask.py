@@ -87,7 +87,7 @@ for patientName in os.listdir(src_folder):
 
         # Check whether some new lesion-voxels are affected by brain extraction
         for expert_id in range(1, 5):
-            gt_fname = os.path.join(src_patient_folder, "ground_truth_expert{}.nii.gz".format(expert_id))
+            gt_fname = os.path.join(dest_patient_folder, "ground_truth_expert{}.nii.gz".format(expert_id))
             gt_im = nib.load(gt_fname)
             is_gt_cropped = np.any(diff_np * gt_im.get_fdata())
             if is_gt_cropped:
