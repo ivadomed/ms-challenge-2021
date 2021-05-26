@@ -1,0 +1,123 @@
+{
+    "command": "train",
+    "gpu_ids": [0, 1, 2, 3],
+    "log_directory": "20210512_ms_challenge_baseline",
+    "model_name": "ms_brain",
+    "debugging": true,
+    "object_detection_params": {
+        "object_detection_path": null
+    },
+    "loader_parameters": {
+        "bids_path": "duke/projects/ivadomed/ms_challenge_2021_BIDS",
+        "target_suffix": [
+            "_seg-lesion"
+        ],
+        "roi_params": {
+            "suffix": null,
+            "slice_filter_roi": null
+        },
+        "contrast_params": {
+            "training_validation": [
+                "t1-FLAIR", "t2-FLAIR"
+            ],
+            "testing": [
+                "t1-FLAIR", "t2-FLAIR"
+            ],
+            "balance": {},
+            "contrast_lst": [
+                "t1-FLAIR", "t2-FLAIR"
+            ]
+        },
+        "slice_filter_params": {
+            "filter_empty_mask": false,
+            "filter_empty_input": true
+        },
+        "slice_axis": "axial",
+        "multichannel": true,
+        "soft_gt": false
+    },
+    "split_dataset": {
+        "fname_split": null,
+        "random_seed": 1313,
+        "center_test": [],
+	"balance": null,
+        "method": "per_patient",
+        "train_fraction": 0.6,
+        "test_fraction": 0.2
+    },
+    "training_parameters": {
+        "batch_size": 24,
+        "loss": {
+            "name": "DiceLoss"
+        },
+        "training_time": {
+            "num_epochs": 200,
+            "early_stopping_patience": 50,
+            "early_stopping_epsilon": 0.001
+        },
+        "scheduler": {
+            "initial_lr": 5e-05,
+            "lr_scheduler": {
+                "name": "CosineAnnealingLR",
+                "base_lr": 1e-05,
+                "max_lr": 0.01
+            }
+        },
+        "balance_samples": {"applied": false, "type": "gt"},
+        "mixup_alpha": null,
+        "transfer_learning": {
+            "retrain_model": null,
+            "retrain_fraction": 1.0
+        }
+    },
+    "default_model": {
+        "name": "Unet",
+        "dropout_rate": 0.3,
+        "bn_momentum": 0.9,
+        "depth": 4,
+        "folder_name": "ms_brain",
+        "in_channel": 5,
+        "out_channel": 1
+    },
+    "postprocessing": {"binarize_prediction": {"thr": 0.5}},
+    "transformation": {
+        "Resample":
+        {
+            "wspace": 1,
+            "hspace": 1,
+            "dspace": 1,
+	    "preprocessing": true
+        },
+        "CenterCrop": {
+            "size": [
+                160,
+                224
+            ],
+            "preprocessing": true
+        },
+        "RandomAffine": {
+            "degrees": 20,
+            "scale": [
+                0.1,
+                0.1
+            ],
+            "translate": [
+                0.1,
+                0.1
+            ],
+            "applied_to": [
+                "im",
+                "gt"
+            ],
+            "dataset_type": [
+                "training"
+            ]
+        },
+        "NumpyToTensor": {},
+        "NormalizeInstance": {
+            "applied_to": [
+                "im"
+            ]
+        }
+    }
+}
