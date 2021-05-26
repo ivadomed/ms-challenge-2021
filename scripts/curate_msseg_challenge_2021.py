@@ -25,8 +25,9 @@ def main(root_data):
 
     # Path for raw images:
     # /sub-XXX/anat/sub-XXX_ses-0X_acq-middlespace_FLAIR.nii.gz
-    dict_images = {"flair_time01_on_middle_space.nii.gz": "_ses-01_acq-middlespace_FLAIR.nii.gz",
-                   "flair_time02_on_middle_space.nii.gz": "_ses-02_acq-middlespace_FLAIR.nii.gz",
+    image_end_name = "acq-middlespace_FLAIR.nii.gz"
+    dict_images = {"flair_time01_on_middle_space.nii.gz": "ses-01",
+                   "flair_time02_on_middle_space.nii.gz": "ses-02",
                    }
     # Path for derivative images:
     # /derivatives/labels/sub-XXX/anat/sub-XXX_acq-expertX_lesion-manual.nii.gz
@@ -49,11 +50,12 @@ def main(root_data):
                 path_subid_bids_dir_out = os.path.join(output_data, 'derivatives', 'labels', subid_bids, 'anat')
                 flag_der = True
             else:
-                path_subid_bids_dir_out = os.path.join(output_data, subid_bids, 'anat')
+                path_subid_bids_dir_out = os.path.join(output_data, subid_bids, dict_images[file], 'anat')
             if not os.path.isdir(path_subid_bids_dir_out):
                 os.makedirs(path_subid_bids_dir_out)
             if flag_der is False:
-                path_file_out = os.path.join(path_subid_bids_dir_out, subid_bids + dict_images[file])
+                path_file_out = os.path.join(path_subid_bids_dir_out,
+                                             '{0}_{1}_{2}'.format(subid_bids, dict_images[file], image_end_name))
             else:
                 path_file_out = os.path.join(path_subid_bids_dir_out, subid_bids + dict_der[file])
             shutil.copy(path_file_in, path_file_out)
