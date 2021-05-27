@@ -47,7 +47,7 @@ def main(root_data):
             path_file_in = os.path.join(path_sub, file)
             flag_der = False
             if file.startswith('ground_truth'):
-                path_subid_bids_dir_out = os.path.join(output_data, 'derivatives', 'labels', subid_bids, 'anat')
+                path_subid_bids_dir_out = os.path.join(output_data, 'derivatives', 'labels', subid_bids, dict_images[file], 'anat')
                 flag_der = True
             else:
                 path_subid_bids_dir_out = os.path.join(output_data, subid_bids, dict_images[file], 'anat')
