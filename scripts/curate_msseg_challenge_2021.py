@@ -115,6 +115,7 @@ def main(root_data):
     with open(output_data + '/participants.json', 'w') as json_file:
         json.dump(data_json, json_file, indent=4)
 
+    # Dataset description in the output folder
     dataset_description = {"BIDSVersion": "1.6.0",
                            "Name": "ms_challenge_2021"
                            }
@@ -122,6 +123,15 @@ def main(root_data):
     with open(output_data + '/dataset_description.json', 'w') as json_file:
         json.dump(dataset_description, json_file, indent=4)
 
+
+    # Dataset description in the derivatives folder
+    dataset_description = {"Name": "Example dataset",
+                            "BIDSVersion": "1.6.0",
+                            "PipelineDescription": {"Name": "Example pipeline"}
+                           }
+
+    with open(output_data + '/derivatives/dataset_description.json', 'w') as json_file:
+        json.dump(dataset_description, json_file, indent=4)
 
 
 if __name__ == "__main__":
