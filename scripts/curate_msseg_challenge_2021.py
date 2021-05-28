@@ -115,6 +115,14 @@ def main(root_data):
     with open(output_data + '/participants.json', 'w') as json_file:
         json.dump(data_json, json_file, indent=4)
 
+    dataset_description = {"BIDSVersion": "1.6.0",
+                           "Name": "ms_challenge_2021"
+                           }
+
+    with open(output_data + '/dataset_description.json', 'w') as json_file:
+        json.dump(dataset_description, json_file, indent=4)
+
+
 
 if __name__ == "__main__":
     args = get_parameters()
