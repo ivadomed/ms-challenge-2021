@@ -25,7 +25,7 @@ def main(root_data):
 
     # Path for raw images:
     # /sub-XXX/anat/sub-XXX_ses-0X_acq-middlespace_FLAIR.nii.gz
-    image_end_name = "acq_FLAIR.nii.gz"
+    image_end_name = "FLAIR.nii.gz"
     dict_images = {"flair_time01_on_middle_space.nii.gz": "ses-01",
                    "flair_time02_on_middle_space.nii.gz": "ses-02",
                    }
@@ -62,7 +62,7 @@ def main(root_data):
                     path_file_out = os.path.join(path_subid_bids_dir_out,
                                                  '{0}_{1}_{2}'.format(subid_bids, dict_images[file], image_end_name))
                 else:
-                    path_file_out = os.path.join(path_subid_bids_dir_out, subid_bids + "_ses-02_acq_FLAIR" + dict_der[file])
+                    path_file_out = os.path.join(path_subid_bids_dir_out, subid_bids + "_ses-02_FLAIR" + dict_der[file])
                 shutil.copy(path_file_in, path_file_out)
 
         for dirName, subdirList, fileList in os.walk(output_data):
