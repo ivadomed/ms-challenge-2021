@@ -6,9 +6,12 @@
 # - bet2 (FSL) <TODO: VERSION>
 # - SCT <TODO: VERSION>
 # - ANTs <TODO: VERSION>
-# 
+# - animaBrainExtraction (anima) <TODO: VERSION>
+#
 # Usage:
-#   ./preprocess_data.sh <SUBJECT>
+#   ./preprocess_data.sh <SUBJECT> <BRAIN_EXTRACTION_METHOD>
+#
+# Brain extraction method: Use 'anima' to call animaBrainExtraction, otherwise bet2 is used.
 #
 # Manual segmentations or labels should be located under:
 # PATH_DATA/derivatives/labels/SUBJECT/<CONTRAST>/
@@ -66,8 +69,13 @@ sct_register_multimodal -i ${file_ses1}.nii.gz -iseg ${file_ses1}_seg.nii.gz -d 
 # Dilate spinal cord mask
 sct_maths -i ${file_ses2}_seg.nii.gz -dilate 5 -shape ball -o ${file_ses2}_seg_dilate.nii.gz
 
+# Brain extraction
 # Get brain mask and dilate it
-bet2 ${file_ses2}.nii.gz brain -m
+if [[$2 == "anima" ]]; then
+    python animaBrainExtraction -i ${file_ses2}.nii.gz --mask brain_mask.nii.gz
+else
+    bet2 ${file_ses2}.nii.gz brain -m
+fi
 sct_maths -i brain_mask.nii.gz -dilate 5 -shape ball -o brain_mask_dilate.nii.gz
 
 # Sum masks and binarize
