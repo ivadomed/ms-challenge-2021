@@ -84,7 +84,7 @@ sct_maths -i brain_cord_mask.nii.gz -bin 0.5 -o brain_cord_mask.nii.gz
 
 # Finer registration with ANTs
 # TODO: use initial transform iwth -r flag
-antsRegistration -d 3 -m CC[${file_ses2}.nii.gz, ${file_ses1_onlyfile}_reg.nii.gz, 1, 4, Regular, 1] -t SyN[0.5] -c 20x10x2 -s 0x0x1 -f 8x4x2 -n BSpline -x mask_brain_cord.nii.gz -o [warp_, ${file_ses1_onlyfile}_reg-brain.nii.gz] -v 1
+antsRegistration -d 3 -m CC[${file_ses2}.nii.gz, ${file_ses1_onlyfile}_reg.nii.gz, 1, 4, Regular, 1] -t SyN[0.5] -c 20x10x2 -s 0x0x1 -f 8x4x2 -n BSpline -x brain_cord_mask.nii.gz -o [warp_, ${file_ses1_onlyfile}_reg-brain.nii.gz] -v 1
 
 # Go back to parent folder
 cd ..
