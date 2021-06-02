@@ -77,9 +77,9 @@ for subject in tqdm(subjects, desc='Iterating over Subjects'):
             problematic_subjects.append(subject)
 
     # (2) Create visualizations for QC on i) brain + SC extraction and ii) registration
-    ses01_fpath = os.path.join(processed_subject_path, 'ses-01', 'anat', 'sub-013_ses-01_FLAIR.nii.gz')
+    ses01_fpath = os.path.join(processed_subject_path, 'ses-01', 'anat', '%s_ses-01_FLAIR.nii.gz' % subject)
     ses01_reg_fpath = os.path.join(processed_subject_path, '%s_ses-01_FLAIR_reg-brain.nii.gz' % subject)
-    ses02_fpath = os.path.join(processed_subject_path, 'ses-02', 'anat', 'sub-013_ses-02_FLAIR.nii.gz')
+    ses02_fpath = os.path.join(processed_subject_path, 'ses-02', 'anat', '%s_ses-02_FLAIR.nii.gz' % subject)
 
     qc_subject_path = os.path.join(args.sct_output_path, 'qc', subject)
     if not os.path.exists(qc_subject_path):
