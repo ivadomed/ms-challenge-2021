@@ -32,8 +32,10 @@ set -e -o pipefail
 # Exit if user presses CTRL+C (Linux) or CMD+C (OSX)
 trap "echo Caught Keyboard Interrupt within script. Exiting now.; exit" INT
 
-# Retrieve input params
+# Retrieve input params and other params
 SUBJECT=$1
+BRAIN_EXTRACTION_METHOD=$2
+ANIMA_SCRIPTS_PUBLIC_PATH=$(grep "anima-scripts-public-root" ~/.anima/config.txt | sed 's/.* = //')
 
 # get starting time:
 start=`date +%s`
@@ -61,6 +63,7 @@ file_ses1="ses-01/anat/${SUBJECT}_ses-01_FLAIR"
 file_ses2_onlyfile="${SUBJECT}_ses-02_FLAIR"
 file_ses2="ses-02/anat/${SUBJECT}_ses-02_FLAIR"
 
+# Spinal cord extraction
 sct_deepseg_sc -i ${file_ses1}.nii.gz -c t1
 sct_deepseg_sc -i ${file_ses2}.nii.gz -c t1
 
@@ -71,15 +74,25 @@ sct_register_multimodal -i ${file_ses1}.nii.gz -iseg ${file_ses1_onlyfile}_seg.n
 sct_maths -i ${file_ses2_onlyfile}_seg.nii.gz -dilate 5 -shape ball -o ${file_ses2_onlyfile}_seg_dilate.nii.gz
 
 # Brain extraction
-# Get brain mask and dilate it
-if [[$2 == "anima" ]]; then
-    python animaBrainExtraction -i ${file_ses2}.nii.gz --mask brain_mask.nii.gz
+if [[ $BRAIN_EXTRACTION_METHOD == "anima" ]]; then
+  python $ANIMA_SCRIPTS_PUBLIC_PATH/brain_extraction/animaAtlasBasedBrainExtraction.py -i ${file_ses2}.nii.gz --mask brain_mask.nii.gz
+elif [[ $BRAIN_EXTRACTION_METHOD == "bet2" ]]; then
+  bet2 ${file_ses2}.nii.gz brain -m
+elif [[ $BRAIN_EXTRACTION_METHOD == "anima+bet2" ]]; then
+  python $ANIMA_SCRIPTS_PUBLIC_PATH/brain_extraction/animaAtlasBasedBrainExtraction.py -i ${file_ses2}.nii.gz --mask brain_anima_mask.nii.gz
+  bet2 ${file_ses2}.nii.gz brain_bet2 -m
+  # Sum two brain masks and binarize
+  sct_maths -i brain_anima_mask.nii.gz -add brain_bet2_mask.nii.gz -o brain_mask.nii.gz
+  sct_maths -i brain_mask.nii.gz -bin 0.5 -o brain_mask.nii.gz
 else
-    bet2 ${file_ses2}.nii.gz brain -m
+  echo "Brain extraction method = ${BRAIN_EXTRACTION_METHOD} is not recognized!"
+  exit 1
 fi
+
+# Dilate brain mask
 sct_maths -i brain_mask.nii.gz -dilate 5 -shape ball -o brain_mask_dilate.nii.gz
 
-# Sum masks and binarize
+# Sum brain mask and spinal cord mask and binarize
 sct_maths -i brain_mask_dilate.nii.gz -add ${file_ses2_onlyfile}_seg_dilate.nii.gz -o brain_cord_mask.nii.gz
 sct_maths -i brain_cord_mask.nii.gz -bin 0.5 -o brain_cord_mask.nii.gz
 
