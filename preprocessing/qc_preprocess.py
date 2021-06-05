@@ -61,10 +61,12 @@ for subject in tqdm(subjects, desc='Iterating over Subjects'):
 
     mask = nib.load(mask_fpath)
 
-    # Compare to GT from each and every expert
-    # NOTE: Since the final GT is majority-voting, we need to check each expert's GT
-    for expert_id in range(1, 5):
-        gt_fpath = os.path.join(subject_labels_path, "%s_ses-02_FLAIR_lesion-manual-rater%d.nii.gz" % (subject, expert_id))
+    # Compare to GT from each and every expert and consensus
+    for expert_id in list(range(1, 5)) + ['CONSENSUS']:
+        if expert_id != 'CONSENSUS':
+            gt_fpath = os.path.join(subject_labels_path, "%s_ses-02_FLAIR_lesion-manual-rater%d.nii.gz" % (subject, expert_id))
+        else:
+            gt_fpath = os.path.join(subject_labels_path, "%s_ses-02_FLAIR_seg-lesion.nii.gz" % subject)
         gt = nib.load(gt_fpath)
 
         # Compute difference between the brain + SC mask and GT
@@ -74,9 +76,13 @@ for subject in tqdm(subjects, desc='Iterating over Subjects'):
         is_gt_cropped = np.any(crop)
 
         if is_gt_cropped:
-            print("\n\tALERT: Lesion(s) from expert %d cropped during preprocessing for subject: %s." % (expert_id, subject))
-            print("\tNumber of Pixels Cropped: %d" % np.count_nonzero(crop))
+            print("\n\tALERT: Lesion(s) from expert %s cropped during preprocessing for subject: %s" % (str(expert_id), subject))
+            print("\t\tNumber of Voxels Cropped: %d" % np.count_nonzero(crop))
             problematic_subjects.append(subject)
+
+            # Print location of the cropped voxels w.r.t. (for `fsleyes` viz.)
+            voxel_coords = list(zip(*np.where(crop != 0)))
+            print('\t\tCropped Voxel Coordinates: ', voxel_coords)
 
     # (2) Create visualizations for QC on i) brain + SC extraction and ii) registration
     ses01_fpath = os.path.join(processed_subject_path, 'ses-01', 'anat', '%s_ses-01_FLAIR.nii.gz' % subject)
@@ -122,4 +128,4 @@ for subject in tqdm(subjects, desc='Iterating over Subjects'):
     imageio.mimsave(ses01_reg_to_ses02_viz_fpath, [imageio.imread(f) for f in (ses01_reg_viz_fpath, ses02_viz_fpath)], duration=0.5)
 
 if not problematic_subjects == []:
-    print("\tALERT: Problematic Subjects Found: %s" % list(set(problematic_subjects)))
+    print("\n\tALERT: Problematic Subjects Found: %s" % list(set(problematic_subjects)))
