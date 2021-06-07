@@ -119,7 +119,7 @@ fslmaths ${file_ses2_onlyfile}_res.nii.gz -mas brain_cord_mask.nii.gz ${file_ses
 # (2) Go to subject folder for segmentation GTs
 cd $PATH_DATA_PROCESSED/derivatives/labels/$SUBJECT
 
-file_gt1_onlyfile="${SUBJECT}_ses-01_FLAIR_lesion-manual-rater1"
+file_gt1_onlyfile="${SUBJECT}_ses-02_FLAIR_lesion-manual-rater1"
 file_gt1="ses-02/anat/${SUBJECT}_ses-02_FLAIR_lesion-manual-rater1"
 file_gt2_onlyfile="${SUBJECT}_ses-02_FLAIR_lesion-manual-rater2"
 file_gt2="ses-02/anat/${SUBJECT}_ses-02_FLAIR_lesion-manual-rater2"
