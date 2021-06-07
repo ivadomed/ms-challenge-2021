@@ -11,6 +11,7 @@ import imageio
 import pandas as pd
 import nibabel as nib
 import numpy as np
+import cv2
 
 # Argument parsing
 parser = argparse.ArgumentParser(description='Quality control for brain + SC extraction and registration.')
@@ -84,7 +85,7 @@ for subject in tqdm(subjects, desc='Iterating over Subjects'):
             voxel_coords = list(zip(*np.where(crop != 0)))
             print('\t\tCropped Voxel Coordinates: ', voxel_coords)
 
-    # (2) Create visualizations for QC on i) brain + SC extraction and ii) registration
+    # (2) Create per-subject visualizations for QC on i) brain + SC extraction and ii) registration
     ses01_fpath = os.path.join(processed_subject_path, 'ses-01', 'anat', '%s_ses-01_FLAIR.nii.gz' % subject)
     ses01_reg_fpath = os.path.join(processed_subject_path, '%s_ses-01_FLAIR_reg-brain.nii.gz' % subject)
     ses02_fpath = os.path.join(processed_subject_path, 'ses-02', 'anat', '%s_ses-02_FLAIR.nii.gz' % subject)
@@ -109,9 +110,9 @@ for subject in tqdm(subjects, desc='Iterating over Subjects'):
         os.system('fslmaths %s -mas %s %s' % (ses01_reg_fpath, mask_fpath, ses01_crop_reg_fpath))
         os.system('fslmaths %s -mas %s %s' % (ses02_fpath, mask_fpath, ses02_crop_fpath))
 
-        os.system('fsleyes render -of %s %s -dr 0 600' % (ses01_viz_fpath, ses01_crop_fpath))
-        os.system('fsleyes render -of %s %s -dr 0 600' % (ses01_reg_viz_fpath, ses01_crop_reg_fpath))
-        os.system('fsleyes render -of %s %s -dr 0 600' % (ses02_viz_fpath, ses02_crop_fpath))
+        os.system('fsleyes render -of %s %s' % (ses01_viz_fpath, ses01_crop_fpath))
+        os.system('fsleyes render -of %s %s' % (ses01_reg_viz_fpath, ses01_crop_reg_fpath))
+        os.system('fsleyes render -of %s %s' % (ses02_viz_fpath, ses02_crop_fpath))
 
         # Remove the cropped images to save space; they can easily be re-generated
         os.system('rm %s' % ses01_crop_fpath)
@@ -120,12 +121,77 @@ for subject in tqdm(subjects, desc='Iterating over Subjects'):
 
     # If not cropping the VOI, simply overlay the masks in red color for each session
     else:
-        os.system('fsleyes render -of %s %s -dr 0 600 %s -dr 0 1 -a 30 -cm red' % (ses01_viz_fpath, ses01_fpath, mask_fpath))
-        os.system('fsleyes render -of %s %s -dr 0 600 %s -dr 0 1 -a 30 -cm red' % (ses01_reg_viz_fpath, ses01_reg_fpath, mask_fpath))
-        os.system('fsleyes render -of %s %s -dr 0 600 %s -dr 0 1 -a 30 -cm red' % (ses02_viz_fpath, ses02_fpath, mask_fpath))
+        os.system('fsleyes render -of %s %s %s -dr 0 1 -a 30 -cm red' % (ses01_viz_fpath, ses01_fpath, mask_fpath))
+        os.system('fsleyes render -of %s %s %s -dr 0 1 -a 30 -cm red' % (ses01_reg_viz_fpath, ses01_reg_fpath, mask_fpath))
+        os.system('fsleyes render -of %s %s %s -dr 0 1 -a 30 -cm red' % (ses02_viz_fpath, ses02_fpath, mask_fpath))
 
     imageio.mimsave(ses01_to_ses02_viz_fpath, [imageio.imread(f) for f in (ses01_viz_fpath, ses02_viz_fpath)], duration=0.5)
     imageio.mimsave(ses01_reg_to_ses02_viz_fpath, [imageio.imread(f) for f in (ses01_reg_viz_fpath, ses02_viz_fpath)], duration=0.5)
 
+# (3) Create aggregated visualizations for QC on i) brain + SC extraction and ii) registration
+gif_filenames = ['ses01_to_ses02.gif', 'ses01_reg_to_ses02.gif']
+subject_gif_filepaths = [[os.path.join(args.sct_output_path, 'qc', subject, f) for f in gif_filenames] for subject in subjects]
+agg_subject_gif_filepaths = [os.path.join(args.sct_output_path, 'qc', subject, '%s_agg.gif' % subject) for subject in subjects]
+agg_gif_filepath = os.path.join(args.sct_output_path, 'qc', 'agg.gif')
+# NOTE: `subject_gif_gilepaths` are populated with step (2), whereas `agg_subject_gif_filepaths` and `agg_gif_filepath` will be populated now!
+cv2_text_args = dict(fontFace=cv2.FONT_HERSHEY_SIMPLEX, color=(255, 255, 255), thickness=2, lineType=cv2.LINE_AA)
+
+for i, f in enumerate(tqdm(subject_gif_filepaths, desc='Iterating over Singular GIFs')):
+    original_gif, reg_gif = imageio.get_reader(f[0]), imageio.get_reader(f[1])
+    new_imgs = []
+
+    # 1st Frame
+    ses1_img = original_gif.get_next_data()
+    cv2.putText(ses1_img, text='BEFORE', org=(380, 75), fontScale=1, **cv2_text_args)
+    cv2.putText(ses1_img, text='ses-01', org=(380, 115), fontScale=1, **cv2_text_args)
+
+    ses_01_reg_img = reg_gif.get_next_data()
+    cv2.putText(ses_01_reg_img, text='AFTER', org=(380, 75), fontScale=1, **cv2_text_args)
+    cv2.putText(ses_01_reg_img, text='ses-01_reg', org=(380, 115), fontScale=1, **cv2_text_args)
+    new_imgs.append(np.hstack((ses1_img, ses_01_reg_img)))
+
+    # 2nd Frame
+    ses2_img = original_gif.get_next_data()
+    cv2.putText(ses2_img, text='BEFORE', org=(380, 75), fontScale=1, **cv2_text_args)
+    cv2.putText(ses2_img, text='ses-02', org=(380, 115), fontScale=1, **cv2_text_args)
+
+    ses2_img_ = reg_gif.get_next_data()
+    cv2.putText(ses2_img_, text='AFTER', org=(380, 75), fontScale=1, **cv2_text_args)
+    cv2.putText(ses2_img_, text='ses-02', org=(380, 115), fontScale=1, **cv2_text_args)
+    new_imgs.append(np.hstack((ses2_img, ses2_img_)))
+
+    # Close previous GIFs and write the new GIF to file
+    original_gif.close()
+    reg_gif.close()
+    imageio.mimsave(agg_subject_gif_filepaths[i], new_imgs, duration=0.5)
+
+
+new_imgs_frame1, new_imgs_frame2 = [], []
+for i, f in enumerate(tqdm(agg_subject_gif_filepaths, desc='Iterating over Aggregated GIFs')):
+    agg_subject_gif = imageio.get_reader(f)
+
+    # 1st Frame
+    img1 = agg_subject_gif.get_next_data()
+    cv2.putText(img1, text=subjects[i], org=(675, 75), fontScale=2, **cv2_text_args)
+    new_imgs_frame1.append(img1)
+
+    # 2nd Frame
+    img2 = agg_subject_gif.get_next_data()
+    cv2.putText(img2, text=subjects[i], org=(675, 75), fontScale=2, **cv2_text_args)
+    new_imgs_frame2.append(img2)
+
+    # Close previous aggregated subject GIFs and also delete them! (NOTE: Only need the final GIF!)
+    agg_subject_gif.close()
+    os.system('rm %s' % f)
+
+# Concatenate all of the aggregated subject GIFs into a single GIF
+# NOTE: To concatenate properly, we need matching dimensions; use min height and width among all!
+min_h = min([img.shape[0] for img in new_imgs_frame1])
+min_w = min([img.shape[1] for img in new_imgs_frame2])
+new_imgs_frame1 = np.concatenate([img[:min_h, :min_w, :] for img in new_imgs_frame1], axis=0)
+new_imgs_frame2 = np.concatenate([img[:min_h, :min_w, :] for img in new_imgs_frame2], axis=0)
+imageio.mimsave(agg_gif_filepath, [new_imgs_frame1, new_imgs_frame2], duration=0.5)
+
+# Print all of the problematic subjects
 if not problematic_subjects == []:
     print("\n\tALERT: Problematic Subjects Found: %s" % list(set(problematic_subjects)))
