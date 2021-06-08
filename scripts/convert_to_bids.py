@@ -105,7 +105,7 @@ def main(root_data):
                 },
                 "sex": {
                     "Description": "M or F",
-                    "LongName": "Participant gender"
+                    "LongName": "Participant sex"
                 },
                 "age": {
                     "Description": "yy",
