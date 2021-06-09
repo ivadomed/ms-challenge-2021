@@ -63,7 +63,7 @@
                 "max_lr": 0.01
             }
         },
-        "balance_samples": {"applied": false, "type": "gt"},
+        "balance_samples": {"applied": true, "type": "gt"},
         "mixup_alpha": null,
         "transfer_learning": {
             "retrain_model": null,
