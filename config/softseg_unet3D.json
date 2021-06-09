@@ -83,7 +83,7 @@
         "bn_momentum": 0.9,
         "depth": 4,
         "folder_name": "ms_brain",
-        "in_channel": 5,
+        "in_channel": 2,
         "out_channel": 1,
         "final_activation": "relu"
     },
