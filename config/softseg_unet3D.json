@@ -1,7 +1,7 @@
 {
     "command": "train",
     "gpu_ids": [0, 1, 2, 3],
-    "log_directory": "20210512_ms_challenge_baseline",
+    "log_directory": "20210512_ms_challenge_softsegUNet3D",
     "model_name": "ms_brain",
     "debugging": true,
     "object_detection_params": {
@@ -34,7 +34,7 @@
         },
         "slice_axis": "axial",
         "multichannel": true,
-        "soft_gt": false
+        "soft_gt": true
     },
     "split_dataset": {
         "fname_split": null,
@@ -46,9 +46,9 @@
         "test_fraction": 0.2
     },
     "training_parameters": {
-        "batch_size": 24,
+        "batch_size": 8,
         "loss": {
-            "name": "DiceLoss"
+            "name": "AdapWingLoss"
         },
         "training_time": {
             "num_epochs": 200,
@@ -63,12 +63,19 @@
                 "max_lr": 0.01
             }
         },
-        "balance_samples": {"applied": false, "type": "gt"},
+        "balance_samples": {"applied": true, "type": "gt"},
         "mixup_alpha": null,
         "transfer_learning": {
             "retrain_model": null,
             "retrain_fraction": 1.0
         }
+    },
+    "UNet3D": {
+        "applied": true,
+        "length_3D": [128, 128, 128],
+        "padding_3D": 32,
+        "attention": false,
+        "n_filters": 8
     },
     "default_model": {
         "name": "Unet",
@@ -77,7 +84,8 @@
         "depth": 4,
         "folder_name": "ms_brain",
         "in_channel": 5,
-        "out_channel": 1
+        "out_channel": 1,
+        "final_activation": "relu"
     },
     "postprocessing": {"binarize_prediction": {"thr": 0.5}},
     "transformation": {
@@ -86,11 +94,12 @@
             "wspace": 1,
             "hspace": 1,
             "dspace": 1,
-	    "preprocessing": true
+	        "preprocessing": true
         },
         "CenterCrop": {
             "size": [
-                160,
+                224,
+                224,
                 224
             ],
             "preprocessing": true
@@ -99,9 +108,11 @@
             "degrees": 20,
             "scale": [
                 0.1,
+                0.1,
                 0.1
             ],
             "translate": [
+                0.1,
                 0.1,
                 0.1
             ],
