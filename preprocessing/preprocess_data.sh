@@ -130,8 +130,8 @@ fslmaths ${file_ses1_onlyfile}_reg-brain.nii.gz -mas brain_cord_mask.nii.gz ${fi
 fslmaths ${file_ses2_onlyfile}_res.nii.gz -mas brain_cord_mask.nii.gz ${file_ses2_onlyfile}_res_masked.nii.gz
 
 # Remove bias from both sessions
-$ANIMA_ANIMA_BINARIES_PATH/animaN4BiasCorrection -i ${file_ses1_onlyfile}_reg-brain_masked.nii.gz -o ${file_ses1_onlyfile}_reg-brain_masked.nii.gz -B 0.3
-$ANIMA_ANIMA_BINARIES_PATH/animaN4BiasCorrection -i ${file_ses2_onlyfile}_res_masked.nii.gz -o ${file_ses2_onlyfile}_res_masked.nii.gz -B 0.3
+$ANIMA_BINARIES_PATH/animaN4BiasCorrection -i ${file_ses1_onlyfile}_reg-brain_masked.nii.gz -o ${file_ses1_onlyfile}_reg-brain_masked.nii.gz -B 0.3
+$ANIMA_BINARIES_PATH/animaN4BiasCorrection -i ${file_ses2_onlyfile}_res_masked.nii.gz -o ${file_ses2_onlyfile}_res_masked.nii.gz -B 0.3
 
 # Crop the VOI based on the brain + SC mask to minimize the input image size
 fslroi ${file_ses1_onlyfile}_reg-brain_masked.nii.gz ${file_ses1_onlyfile}_reg-brain_masked.nii.gz $brain_cord_mask_bbox_coords
@@ -171,7 +171,7 @@ fslmaths ${file_gtc_onlyfile}_res.nii.gz -mas $PATH_DATA_PROCESSED/$SUBJECT/brai
 
 # Crop the VOI based on the brain + SC mask to minimize the GT image size
 fslroi ${file_gt1_onlyfile}_res_masked.nii.gz ${file_gt1_onlyfile}_res_masked.nii.gz $brain_cord_mask_bbox_coords
-fslroi ${file_gt2_onlyfile}_res_masked.nii.gz ${file_gt2_onlyfile}_res_masked.nii.gz $$brain_cord_mask_bbox_coords
+fslroi ${file_gt2_onlyfile}_res_masked.nii.gz ${file_gt2_onlyfile}_res_masked.nii.gz $brain_cord_mask_bbox_coords
 fslroi ${file_gt3_onlyfile}_res_masked.nii.gz ${file_gt3_onlyfile}_res_masked.nii.gz $brain_cord_mask_bbox_coords
 fslroi ${file_gt4_onlyfile}_res_masked.nii.gz ${file_gt4_onlyfile}_res_masked.nii.gz $brain_cord_mask_bbox_coords
 fslroi ${file_gtc_onlyfile}_res_masked.nii.gz ${file_gtc_onlyfile}_res_masked.nii.gz $brain_cord_mask_bbox_coords
