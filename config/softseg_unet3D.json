@@ -1,14 +1,14 @@
 {
     "command": "train",
-    "gpu_ids": [0, 1, 2, 3],
-    "log_directory": "20210512_ms_challenge_softsegUNet3D",
+    "gpu_ids": [0],
+    "log_directory": "ms_challenge_softsegUNet3D_logs",
     "model_name": "ms_brain",
     "debugging": true,
     "object_detection_params": {
         "object_detection_path": null
     },
     "loader_parameters": {
-        "bids_path": "duke/projects/ivadomed/ms_challenge_2021_BIDS",
+        "bids_path": "duke/projects/ivadomed/tmp_ms_challenge_2021_preprocessed",
         "target_suffix": [
             "_seg-lesion"
         ],
@@ -18,14 +18,14 @@
         },
         "contrast_params": {
             "training_validation": [
-                "t1-FLAIR", "t2-FLAIR"
+                "FLAIR", "T1w"
             ],
             "testing": [
-                "t1-FLAIR", "t2-FLAIR"
+                "FLAIR", "T1w"
             ],
             "balance": {},
             "contrast_lst": [
-                "t1-FLAIR", "t2-FLAIR"
+                "FLAIR", "T1w"
             ]
         },
         "slice_filter_params": {
@@ -46,7 +46,7 @@
         "test_fraction": 0.2
     },
     "training_parameters": {
-        "batch_size": 8,
+        "batch_size": 32,
         "loss": {
             "name": "AdapWingLoss"
         },
@@ -72,9 +72,9 @@
     },
     "UNet3D": {
         "applied": true,
-        "length_3D": [128, 128, 128],
-        "padding_3D": 32,
-        "attention": false,
+        "length_3D": [192, 224, 256],
+        "stride_3D": [64, 64, 64],
+        "attention": true,
         "n_filters": 8
     },
     "default_model": {
@@ -91,9 +91,9 @@
     "transformation": {
         "CenterCrop": {
             "size": [
-                224,
-                224,
-                224
+                320,
+                416,
+                512
             ],
             "preprocessing": true
         },
