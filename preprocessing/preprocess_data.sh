@@ -80,16 +80,17 @@ file_ses1="ses-01/anat/${SUBJECT}_ses-01_FLAIR"
 file_ses2_onlyfile="${SUBJECT}_ses-02_FLAIR"
 file_ses2="ses-02/anat/${SUBJECT}_ses-02_FLAIR"
 
-# Resample both sessions to isotropic 1 mm x 1mm x 1mm voxel dimensions
-flirt -in ${file_ses1}.nii.gz -ref ${file_ses1}.nii.gz -applyisoxfm 1.0 -nosearch -out ${file_ses1_onlyfile}_res.nii.gz
-flirt -in ${file_ses2}.nii.gz -ref ${file_ses2}.nii.gz -applyisoxfm 1.0 -nosearch -out ${file_ses2_onlyfile}_res.nii.gz
+# Resample both sessions to isotropic 0.5mm x 0.5mm x 0.5mm voxel dimensions
+flirt -in ${file_ses1}.nii.gz -ref ${file_ses1}.nii.gz -applyisoxfm 0.5 -nosearch -out ${file_ses1_onlyfile}_res.nii.gz
+flirt -in ${file_ses2}.nii.gz -ref ${file_ses2}.nii.gz -applyisoxfm 0.5 -nosearch -out ${file_ses2_onlyfile}_res.nii.gz
 
 # Spinal cord extraction
 sct_deepseg_sc -i ${file_ses1_onlyfile}_res.nii.gz -c t1 -o ${file_ses1_onlyfile}_seg.nii.gz
 sct_deepseg_sc -i ${file_ses2_onlyfile}_res.nii.gz -c t1 -o ${file_ses2_onlyfile}_seg.nii.gz
 
 # Perform registration ses-01 --> ses-02
-sct_register_multimodal -i ${file_ses1_onlyfile}_res.nii.gz -iseg ${file_ses1_onlyfile}_seg.nii.gz -d ${file_ses2_onlyfile}_res.nii.gz -dseg ${file_ses2_onlyfile}_seg.nii.gz -o ${file_ses1_onlyfile}_reg.nii.gz -param step=1,type=seg,algo=slicereg,metric=MeanSquares,smooth=3
+# NOTE: We are passing the un-resampled / original ses-01 as the input to avoid double interpolation
+sct_register_multimodal -i ${file_ses1}.nii.gz -iseg ${file_ses1_onlyfile}_seg.nii.gz -d ${file_ses2_onlyfile}_res.nii.gz -dseg ${file_ses2_onlyfile}_seg.nii.gz -o ${file_ses1_onlyfile}_reg.nii.gz -param step=1,type=seg,algo=slicereg,metric=MeanSquares,smooth=3
 
 # Dilate spinal cord mask
 sct_maths -i ${file_ses2_onlyfile}_seg.nii.gz -dilate 5 -shape ball -o ${file_ses2_onlyfile}_seg_dilate.nii.gz
@@ -155,12 +156,12 @@ file_gt4="ses-02/anat/${SUBJECT}_ses-02_FLAIR_lesion-manual-rater4"
 file_gtc_onlyfile="${SUBJECT}_ses-02_FLAIR_seg-lesion"
 file_gtc="ses-02/anat/${SUBJECT}_ses-02_FLAIR_seg-lesion"
 
-# Resample segmentation GTs to isotropic 1 mm x 1mm x 1mm voxel dimensions
-flirt -in ${file_gt1}.nii.gz -ref ${file_gt1}.nii.gz -applyisoxfm 1.0 -nosearch -out ${file_gt1_onlyfile}_res.nii.gz
-flirt -in ${file_gt2}.nii.gz -ref ${file_gt2}.nii.gz -applyisoxfm 1.0 -nosearch -out ${file_gt2_onlyfile}_res.nii.gz
-flirt -in ${file_gt3}.nii.gz -ref ${file_gt3}.nii.gz -applyisoxfm 1.0 -nosearch -out ${file_gt3_onlyfile}_res.nii.gz
-flirt -in ${file_gt4}.nii.gz -ref ${file_gt4}.nii.gz -applyisoxfm 1.0 -nosearch -out ${file_gt4_onlyfile}_res.nii.gz
-flirt -in ${file_gtc}.nii.gz -ref ${file_gtc}.nii.gz -applyisoxfm 1.0 -nosearch -out ${file_gtc_onlyfile}_res.nii.gz
+# Resample segmentation GTs to isotropic 0.5mm x 0.5mm x 0.5mm voxel dimensions
+flirt -in ${file_gt1}.nii.gz -ref ${file_gt1}.nii.gz -applyisoxfm 0.5 -nosearch -out ${file_gt1_onlyfile}_res.nii.gz
+flirt -in ${file_gt2}.nii.gz -ref ${file_gt2}.nii.gz -applyisoxfm 0.5 -nosearch -out ${file_gt2_onlyfile}_res.nii.gz
+flirt -in ${file_gt3}.nii.gz -ref ${file_gt3}.nii.gz -applyisoxfm 0.5 -nosearch -out ${file_gt3_onlyfile}_res.nii.gz
+flirt -in ${file_gt4}.nii.gz -ref ${file_gt4}.nii.gz -applyisoxfm 0.5 -nosearch -out ${file_gt4_onlyfile}_res.nii.gz
+flirt -in ${file_gtc}.nii.gz -ref ${file_gtc}.nii.gz -applyisoxfm 0.5 -nosearch -out ${file_gtc_onlyfile}_res.nii.gz
 
 # Apply the brain + SC mask to the final forms of all segmentation GTs
 fslmaths ${file_gt1_onlyfile}_res.nii.gz -mas $PATH_DATA_PROCESSED/$SUBJECT/brain_cord_mask.nii.gz ${file_gt1_onlyfile}_res_masked.nii.gz
@@ -205,8 +206,8 @@ FILES_TO_CHECK=(
 "${file_ses2_onlyfile}_seg.nii.gz"
 "warp_0InverseWarp.nii.gz"
 "warp_0Warp.nii.gz"
-"warp_${file_ses1_onlyfile}_res2${file_ses2_onlyfile}_res.nii.gz"
-"warp_${file_ses2_onlyfile}_res2${file_ses1_onlyfile}_res.nii.gz"
+"warp_${file_ses1_onlyfile}2${file_ses2_onlyfile}_res.nii.gz"
+"warp_${file_ses2_onlyfile}_res2${file_ses1_onlyfile}.nii.gz"
 )
 
 for file in "${FILES_TO_CHECK[@]}"; do
