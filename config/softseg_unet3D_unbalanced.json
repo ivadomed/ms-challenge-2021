@@ -1,7 +1,7 @@
 {
     "command": "train",
     "gpu_ids": [0],
-    "log_directory": "ms_challenge_softsegUNet3D_logs",
+    "log_directory": "msc2021_softseg_unet3D_unbalanced",
     "model_name": "ms_brain",
     "debugging": true,
     "object_detection_params": {
@@ -38,7 +38,7 @@
         "test_fraction": 0.2
     },
     "training_parameters": {
-        "batch_size": 128,
+        "batch_size": 20,
         "loss": {
             "name": "AdapWingLoss"
         },
@@ -65,7 +65,7 @@
     "Modified3DUNet": {
         "applied": true,
         "length_3D": [128, 128, 128],
-        "stride_3D": [64, 72, 64],
+        "stride_3D": [64, 64, 64],
         "attention": true,
         "n_filters": 8
     },
@@ -84,7 +84,7 @@
         "CenterCrop": {
             "size": [
                 320,
-                416,
+                384,
                 512
             ],
             "preprocessing": true
