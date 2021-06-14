@@ -27,6 +27,6 @@ class TestModel(nn.Module):
         x1_, x2_ = self.upconv2(x1_), self.upconv2(x2_)
 
         # Simply get the differentiable diff. between the two feature maps for now
-        y_hat = torch.sigmoid(x2_ - x1_).squeeze()
+        y_hat = torch.sigmoid(x2_ - x1_)[:, 0]
 
         return y_hat

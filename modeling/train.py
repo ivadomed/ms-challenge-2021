@@ -213,7 +213,7 @@ def main_worker(rank, world_size):
                 loss = criterion(y_hat, y)
 
                 val_epoch_loss += loss.item()
-                val_epoch_dice += dice_metric(y_hat, y)
+                val_epoch_dice += dice_metric(y_hat, y).item()
 
         val_epoch_loss /= len(val_loader)
         val_epoch_dice /= len(val_loader)
