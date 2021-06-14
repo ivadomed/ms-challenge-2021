@@ -2,7 +2,8 @@
 
 This folder handles preprocessing of patient FLAIR volumes before the modelling component. The
 preprocessing pipeline for each subject can be found in `preprocess_data_sh.` The quality control 
-(QC) script for this pipeline is `qc_preprocess.py`.
+(QC) script for this pipeline is `qc_preprocess.py`. The preprocessed data can be found in 
+`~/duke/projects/ivadomed/tmp_ms_challenge_2021_preprocessed`.
 
 ## Steps
 The preprocessing steps include:
