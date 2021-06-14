@@ -1,8 +1,8 @@
 import os
 from tqdm import tqdm
+import random
 import pandas as pd
 import nibabel as nib
-
 import torch
 from torch.utils.data import Dataset
 
@@ -37,7 +37,7 @@ class MSSeg2Dataset(Dataset):
 
         # Get all subjects
         subjects_df = pd.read_csv(os.path.join(root, 'participants.tsv'), sep='\t')
-        subjects = subjects_df['participant_id'].values.tolist()
+        subjects = subjects_df['participant_id'].values.tolist()[0:2]
 
         # Iterate over all subjects and extract patches
         self.patches = []
@@ -73,7 +73,7 @@ class MSSeg2Dataset(Dataset):
                     'gt': gt_patches[i]
                 })
 
-        print('EXTRACTED A TOTAL OF %d PATCHES' % len(self.patches))
+        print('Extracted a total of %d patches!' % len(self.patches))
 
     def volume2patches(self, volume):
         patches = []
@@ -94,17 +94,22 @@ class MSSeg2Dataset(Dataset):
         patches = self.patches[index]
         ses01_patches, ses02_patches, gt_patches = patches['ses01'], patches['ses02'], patches['gt']
 
-        # TODO: Apply random affine: rotation, translation, and scaling
-        # QUESTION: Don't we want to apply the same affine params. to ses01, ses02, and gt?
-        # random_affine = RandomAffine(degrees=20, translate=[0.1, 0.1, 0.1], scale=[0.1, 0.1, 0.1])
-        # ses01_patches = random_affine(sample=ses01_patches, metadata=None)
-        # ses02_patches = random_affine(sample=ses02_patches, metadata=None)
-        # gt_patches = random_affine(sample=gt_patches, metadata=None)
+        # Apply random affine: rotation, translation, and scaling
+        # NOTE: The use of `metadata` ensures that the same affine is applied to all three patches
+        random_affine = RandomAffine(degrees=20, translate=[0.1, 0.1, 0.1], scale=[0.1, 0.1, 0.1])
+        ses01_patches, metadata = random_affine(sample=ses01_patches, metadata={})
+        ses02_patches, _ = random_affine(sample=ses02_patches, metadata=metadata)
+        gt_patches, _ = random_affine(sample=gt_patches, metadata=metadata)
+
+        # If the patches are uniform, let's skip this sample and return a random one
+        # NOTE: This will also help with discarding empty inputs!
+        if ses01_patches.std() < 1e-5 or ses02_patches.std() < 1e-5:
+            return self.__getitem__(random.randint(0, self.__len__() - 1))
 
         # Normalize images to zero mean and unit variance
         normalize_instance = NormalizeInstance()
-        ses01_patches = normalize_instance(sample=ses01_patches, metadata=None)
-        ses02_patches = normalize_instance(sample=ses02_patches, metadata=None)
+        ses01_patches, _ = normalize_instance(sample=ses01_patches, metadata={})
+        ses02_patches, _ = normalize_instance(sample=ses02_patches, metadata={})
 
         # Conversion to PyTorch tensors
         x1 = torch.tensor(ses01_patches, dtype=torch.float)

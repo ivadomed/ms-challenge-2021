@@ -10,10 +10,11 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from transformers import AdamW, get_linear_schedule_with_warmup
-from ivadomed.losses import AdapWingLoss
+from ivadomed.losses import AdapWingLoss, DiceLoss
 
-from .datasets import MSSeg2Dataset
-from .utils import split_dataset
+from datasets import MSSeg2Dataset
+from utils import split_dataset
+from models import TestModel
 
 parser = argparse.ArgumentParser(description='Script for training custom models for MSSeg2 Challenge 2021.')
 
@@ -25,16 +26,16 @@ parser.add_argument('-dr', '--dataset_root', default='/home/GRAMES.POLYMTL.CA/uz
 
 parser.add_argument('-ne', '--num_epochs', default=200, type=str,
                     help='Number of epochs for the training process')
-parser.add_argument('-bs', '--batch_size', default=64, type=str,
+parser.add_argument('-bs', '--batch_size', default=8, type=str,
                     help='Batch size of the training and validation processes')
 parser.add_argument('-nw', '--num_workers', default=0, type=int,
                     help='Number of workers for the dataloaders')
 
-parser.add_argument('--transformer_learning_rate', default=3e-5, type=float,
+parser.add_argument('-tlr', '--transformer_learning_rate', default=3e-5, type=float,
                     help='Learning rate for training the transformer')
-parser.add_argument('--custom_learning_rate', default=1e-3, type=float,
+parser.add_argument('-clr', '--custom_learning_rate', default=1e-3, type=float,
                     help='Learning rate for training the custom additions to the transformer')
-parser.add_argument('--weight_decay', type=float, default=0.01,
+parser.add_argument('-wd', '--weight_decay', type=float, default=0.01,
                     help='Weight decay (i.e. regularization) value in AdamW')
 parser.add_argument('--betas', type=tuple, default=(0.9, 0.999),
                     help='Decay terms for the AdamW optimizer')
@@ -49,7 +50,7 @@ parser.add_argument('-se', '--seed', default=42, type=int,
                     help='Set seeds for reproducibility')
 
 # Arguments for parallelization
-parser.add_argument('--local_rank', type=int, default=-1,
+parser.add_argument('-loc', '--local_rank', type=int, default=-1,
                     help='Local rank for distributed training on GPUs; set to != -1 to start distributed GPU training')
 parser.add_argument('--master_addr', type=str, default='localhost',
                     help='Address of master; master must be able to accept network traffic on the address and port')
@@ -71,15 +72,15 @@ def main_worker(rank, world_size):
     print('Trained model will be saved to: %s' % args.save)
 
     if args.local_rank == -1:
-        device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     else:
         torch.cuda.set_device(rank)
         device = torch.device('cuda', rank)
         # Use NCCL for GPU training, process must have exclusive access to GPUs
-        torch.distributed.init_process_group(backend='nccl', init_method='env://', rank=rank,  world_size=world_size)
+        torch.distributed.init_process_group(backend='nccl', init_method='env://', rank=rank, world_size=world_size)
 
-    # TODO: Initialize model
-    model = None
+    # TODO: Implement new models in `models.py` and change this line
+    model = TestModel()
 
     # Load saved model if applicable
     if args.continue_from_checkpoint:
@@ -109,7 +110,8 @@ def main_worker(rank, world_size):
         except ImportError:
             from torch.nn.parallel import DistributedDataParallel as DDP
             print("Using PyTorch DDP - could not find Apex")
-            model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+            model = DDP(model, device_ids=[rank], find_unused_parameters=False)
+            # TODO: `find_unused_parameters` might have to be True for certain model types!
 
     # Load datasets
     dataset = MSSeg2Dataset(root=args.dataset_root,
@@ -118,6 +120,7 @@ def main_worker(rank, world_size):
                             center_crop_size=(320, 384, 512))
 
     train_dataset, val_dataset = split_dataset(dataset=dataset, val_size=0.3, seed=args.seed)
+    # TODO: We also need test set, right?
 
     if args.local_rank == -1:
         train_loader = DataLoader(dataset=train_dataset, batch_size=args.batch_size, shuffle=True,
@@ -137,34 +140,20 @@ def main_worker(rank, world_size):
 
     # Setup optimizer
     no_weight_decay_ids = ['bias', 'LayerNorm.weight']
-    custom_ids = ['head']
     grouped_model_parameters = [
         {'params': [param for name, param in model.named_parameters()
-                    if not any(id_ in name for id_ in no_weight_decay_ids) and
-                    not any(id_ in name for id_ in custom_ids)],
+                    if not any(id_ in name for id_ in no_weight_decay_ids)],
          'lr': args.transformer_learning_rate,
          'betas': args.betas,
          'weight_decay': args.weight_decay,
          'eps': args.eps},
         {'params': [param for name, param in model.named_parameters()
-                    if any(id_ in name for id_ in no_weight_decay_ids) and
-                    not any(id_ in name for id_ in custom_ids)],
+                    if any(id_ in name for id_ in no_weight_decay_ids)],
          'lr': args.transformer_learning_rate,
          'betas': args.betas,
          'weight_decay': 0.0,
          'eps': args.eps},
-        {'params': [param for name, param in model.named_parameters()
-                    if any(id_ in name for id_ in custom_ids)],
-         'lr': args.custom_learning_rate,
-         'betas': args.betas,
-         'weight_decay': 0.0,
-         'eps': args.eps},
     ]
-
-    # Optionally, set the base transformer to frozen
-    for name, param in model.named_parameters():
-        if not any(id_ in name for id_ in custom_ids):
-            param.requires_grad = False
 
     optimizer = AdamW(grouped_model_parameters)
     num_training_steps = int(args.num_epochs * len(train_dataset) / args.batch_size)
@@ -188,11 +177,12 @@ def main_worker(rank, world_size):
             optimizer.zero_grad()
 
             x1, x2, y = batch
-            x1, x2, y = x1.to(device), x2, y.to(device)
+            x1, x2, y = x1.to(device), x2.to(device), y.to(device)
 
             y_hat = model(x1, x2)
 
             loss = criterion(y_hat, y)
+
             loss.backward()
             optimizer.step()
 
@@ -207,7 +197,7 @@ def main_worker(rank, world_size):
         with torch.no_grad():
             for batch in tqdm(val_loader, desc='Iterating over Validation Examples'):
                 x1, x2, y = batch
-                x1, x2, y = x1.to(device), x2, y.to(device)
+                x1, x2, y = x1.to(device), x2.to(device), y.to(device)
 
                 y_hat = model(x1, x2)
 
@@ -247,8 +237,4 @@ def main():
 
 
 if __name__ == '__main__':
-    # Set random seed for reproducibility
-    # NOTE: Settings seeds requires cuda.deterministic = True, which slows things down considerably
-    # set_seed(seed=args.seed)
-
     main()
