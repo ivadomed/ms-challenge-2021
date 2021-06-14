@@ -26,9 +26,9 @@ parser.add_argument('-dr', '--dataset_root', default='/home/GRAMES.POLYMTL.CA/uz
 parser.add_argument('-fd', '--fraction_data', default=1.0, type=float,
                     help='Fraction of data to use for the experiment. Helps with debugging.')
 
-parser.add_argument('-ne', '--num_epochs', default=200, type=str,
+parser.add_argument('-ne', '--num_epochs', default=200, type=int,
                     help='Number of epochs for the training process')
-parser.add_argument('-bs', '--batch_size', default=20, type=str,
+parser.add_argument('-bs', '--batch_size', default=20, type=int,
                     help='Batch size of the training and validation processes')
 parser.add_argument('-nw', '--num_workers', default=4, type=int,
                     help='Number of workers for the dataloaders')
