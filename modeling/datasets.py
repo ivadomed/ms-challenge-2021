@@ -12,7 +12,7 @@ from ivadomed.transforms import CenterCrop, RandomAffine, NormalizeInstance
 class MSSeg2Dataset(Dataset):
     """Custom PyTorch dataset for the MSSeg2 Challenge 2021. Works only with 3D patches."""
     def __init__(self, root, patch_size=(128, 128, 128), stride_size=(64, 64, 64),
-                 center_crop_size=(512, 512, 512)):
+                 center_crop_size=(512, 512, 512), fraction_data=1.0):
         super(MSSeg2Dataset).__init__()
 
         # Quick argument checks
@@ -31,13 +31,20 @@ class MSSeg2Dataset(Dataset):
         if any([(center_crop_size[i] - patch_size[i]) % stride_size[i] != 0 for i in range(3)]):
             raise ValueError('center_crop_size - patch_size % stride size must be 0 for all dimensions!')
 
+        if not 0.0 < fraction_data <= 1.0:
+            raise ValueError('`fraction_data` needs to be between 0.0 and 1.0!')
+
         self.patch_size = patch_size
         self.stride_size = stride_size
         self.center_crop_size = center_crop_size
 
         # Get all subjects
         subjects_df = pd.read_csv(os.path.join(root, 'participants.tsv'), sep='\t')
-        subjects = subjects_df['participant_id'].values.tolist()[0:2]
+        subjects = subjects_df['participant_id'].values.tolist()
+
+        # Only use subset of the dataset if applicable (used for debugging)
+        if fraction_data != 1.0:
+            subjects = subjects[:int(len(subjects) * fraction_data)]
 
         # Iterate over all subjects and extract patches
         self.patches = []

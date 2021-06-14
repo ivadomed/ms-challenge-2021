@@ -23,12 +23,14 @@ parser.add_argument('-id', '--model_id', default='transunet', type=str,
                     help='Model ID to-be-used for saving the .pt saved model file')
 parser.add_argument('-dr', '--dataset_root', default='/home/GRAMES.POLYMTL.CA/uzmac/duke/projects/ivadomed/tmp_ms_challenge_2021_preprocessed', type=str,
                     help='Root path to the BIDS- and ivadomed-compatible dataset')
+parser.add_argument('-fd', '--fraction_data', default=1.0, type=float,
+                    help='Fraction of data to use for the experiment. Helps with debugging.')
 
 parser.add_argument('-ne', '--num_epochs', default=200, type=str,
                     help='Number of epochs for the training process')
-parser.add_argument('-bs', '--batch_size', default=8, type=str,
+parser.add_argument('-bs', '--batch_size', default=20, type=str,
                     help='Batch size of the training and validation processes')
-parser.add_argument('-nw', '--num_workers', default=0, type=int,
+parser.add_argument('-nw', '--num_workers', default=4, type=int,
                     help='Number of workers for the dataloaders')
 
 parser.add_argument('-tlr', '--transformer_learning_rate', default=3e-5, type=float,
@@ -117,7 +119,8 @@ def main_worker(rank, world_size):
     dataset = MSSeg2Dataset(root=args.dataset_root,
                             patch_size=(128, 128, 128),
                             stride_size=(64, 64, 64),
-                            center_crop_size=(320, 384, 512))
+                            center_crop_size=(320, 384, 512),
+                            fraction_data=args.fraction_data)
 
     train_dataset, val_dataset = split_dataset(dataset=dataset, val_size=0.3, seed=args.seed)
     # TODO: We also need test set, right?
@@ -167,11 +170,15 @@ def main_worker(rank, world_size):
     # TODO: The above params for the AdapWingLoss() are default given by `ivadomed`. Can
     #       we improve them for our application?
 
+    # Setup other metrics
+    dice_metric = DiceLoss(smooth=1.0)
+
     # Training & Evaluation
     for i in tqdm(range(args.num_epochs), desc='Iterating over Epochs'):
         # -------------------------------- TRAINING ------------------------------------
         model.train()
         train_epoch_loss = 0.0
+        train_epoch_dice = 0.0
 
         for batch in tqdm(train_loader, desc='Iterating over Training Examples'):
             optimizer.zero_grad()
@@ -182,17 +189,19 @@ def main_worker(rank, world_size):
             y_hat = model(x1, x2)
 
             loss = criterion(y_hat, y)
-
             loss.backward()
             optimizer.step()
 
             train_epoch_loss += loss.item()
+            train_epoch_dice += dice_metric(y_hat, y).item()
 
         train_epoch_loss /= len(train_loader)
+        train_epoch_dice /= len(train_loader)
 
         # -------------------------------- EVALUATION ------------------------------------
         model.eval()
         val_epoch_loss = 0.0
+        val_epoch_dice = 0.0
 
         with torch.no_grad():
             for batch in tqdm(val_loader, desc='Iterating over Validation Examples'):
@@ -204,13 +213,16 @@ def main_worker(rank, world_size):
                 loss = criterion(y_hat, y)
 
                 val_epoch_loss += loss.item()
+                val_epoch_dice += dice_metric(y_hat, y)
 
         val_epoch_loss /= len(val_loader)
+        val_epoch_dice /= len(val_loader)
 
         torch.save(model.state_dict(), os.path.join(args.save, '%s.pt' % model_id))
 
         print('\n')  # Do this in order to go below the second tqdm line
         print(f'\tTrain Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_loss, val_epoch_loss))
+        print(f'\tTrain Dice: %0.4f | Validation Dice: %0.4f' % (train_epoch_dice, val_epoch_dice))
 
         # Apply learning rate decay before the beginning of next epoch if applicable
         scheduler.step()
