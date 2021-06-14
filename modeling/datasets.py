@@ -8,7 +8,7 @@ from torch.utils.data import Dataset
 
 from ivadomed.transforms import CenterCrop, RandomAffine, NormalizeInstance
 
-import numpy as np
+
 class MSSeg2Dataset(Dataset):
     """Custom PyTorch dataset for the MSSeg2 Challenge 2021. Works only with 3D patches."""
     def __init__(self, root, patch_size=(128, 128, 128), stride_size=(64, 64, 64),
