@@ -8,7 +8,7 @@ from torch.utils.data import Dataset
 
 from ivadomed.transforms import CenterCrop, RandomAffine, NormalizeInstance
 
-
+import numpy as np
 class MSSeg2Dataset(Dataset):
     """Custom PyTorch dataset for the MSSeg2 Challenge 2021. Works only with 3D patches."""
     def __init__(self, root, patch_size=(128, 128, 128), stride_size=(64, 64, 64),
@@ -37,6 +37,7 @@ class MSSeg2Dataset(Dataset):
         self.patch_size = patch_size
         self.stride_size = stride_size
         self.center_crop_size = center_crop_size
+        self.train = False
 
         # Get all subjects
         subjects_df = pd.read_csv(os.path.join(root, 'participants.tsv'), sep='\t')
@@ -82,7 +83,12 @@ class MSSeg2Dataset(Dataset):
 
         print('Extracted a total of %d patches!' % len(self.patches))
 
+    def set_train_mode(self):
+        """Enables training augmentations for the current dataset."""
+        self.train = True
+
     def volume2patches(self, volume):
+        """Converts 3D volumes into 3D subvolumes, i.e. patches"""
         patches = []
         assert volume.ndim == 3
 
@@ -101,22 +107,28 @@ class MSSeg2Dataset(Dataset):
         patches = self.patches[index]
         ses01_patches, ses02_patches, gt_patches = patches['ses01'], patches['ses02'], patches['gt']
 
-        # Apply random affine: rotation, translation, and scaling
-        # NOTE: The use of `metadata` ensures that the same affine is applied to all three patches
-        random_affine = RandomAffine(degrees=20, translate=[0.1, 0.1, 0.1], scale=[0.1, 0.1, 0.1])
-        ses01_patches, metadata = random_affine(sample=ses01_patches, metadata={})
-        ses02_patches, _ = random_affine(sample=ses02_patches, metadata=metadata)
-        gt_patches, _ = random_affine(sample=gt_patches, metadata=metadata)
+        # Training augmentations
+        if self.train:
+            # Apply random affine: rotation, translation, and scaling
+            # NOTE: Use of `metadata` ensures that the same affine is applied to all three patches
+            random_affine = RandomAffine(degrees=20, translate=[0.1, 0.1, 0.1], scale=[0.1, 0.1, 0.1])
+            ses01_patches, metadata = random_affine(sample=ses01_patches, metadata={})
+            ses02_patches, _ = random_affine(sample=ses02_patches, metadata=metadata)
+            gt_patches, _ = random_affine(sample=gt_patches, metadata=metadata)
 
-        # If the patches are uniform, let's skip this sample and return a random one
+        # If patches are uniform: train-time -> skip to random sample, val-time -> mean-subtraction
         # NOTE: This will also help with discarding empty inputs!
         if ses01_patches.std() < 1e-5 or ses02_patches.std() < 1e-5:
-            return self.__getitem__(random.randint(0, self.__len__() - 1))
-
+            if self.train:
+                return self.__getitem__(random.randint(0, self.__len__() - 1))
+            else:
+                ses01_patches = ses01_patches - ses01_patches.mean()
+                ses02_patches = ses02_patches - ses02_patches.mean()
         # Normalize images to zero mean and unit variance
-        normalize_instance = NormalizeInstance()
-        ses01_patches, _ = normalize_instance(sample=ses01_patches, metadata={})
-        ses02_patches, _ = normalize_instance(sample=ses02_patches, metadata={})
+        else:
+            normalize_instance = NormalizeInstance()
+            ses01_patches, _ = normalize_instance(sample=ses01_patches, metadata={})
+            ses02_patches, _ = normalize_instance(sample=ses02_patches, metadata={})
 
         # Conversion to PyTorch tensors
         x1 = torch.tensor(ses01_patches, dtype=torch.float)
