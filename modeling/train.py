@@ -1,6 +1,8 @@
 import os
 from copy import deepcopy
 import argparse
+from typing import Dict
+
 from tqdm import tqdm
 
 import torch
@@ -13,8 +15,8 @@ from transformers import AdamW, get_linear_schedule_with_warmup
 from ivadomed.losses import AdapWingLoss, DiceLoss
 
 from datasets import MSSeg2Dataset
-from utils import split_dataset
-from models import TestModel
+from utils import split_dataset, binary_accuracy
+from models import TestModel, TransUNet3D, ModelConfig
 
 parser = argparse.ArgumentParser(description='Script for training custom models for MSSeg2 Challenge 2021.')
 
@@ -25,6 +27,8 @@ parser.add_argument('-dr', '--dataset_root', default='/home/GRAMES.POLYMTL.CA/uz
                     help='Root path to the BIDS- and ivadomed-compatible dataset')
 parser.add_argument('-fd', '--fraction_data', default=1.0, type=float,
                     help='Fraction of data to use for the experiment. Helps with debugging.')
+parser.add_argument('-gt', '--gt_type', choices=['consensus', 'expert1', 'expert2', 'expert3', 'expert4'], default='consensus', type=str,
+                    help='The GT to use for the training process.')
 
 parser.add_argument('-ne', '--num_epochs', default=200, type=int,
                     help='Number of epochs for the training process')
@@ -81,8 +85,19 @@ def main_worker(rank, world_size):
         # Use NCCL for GPU training, process must have exclusive access to GPUs
         torch.distributed.init_process_group(backend='nccl', init_method='env://', rank=rank, world_size=world_size)
 
-    # TODO: Implement new models in `models.py` and change this line
-    model = TestModel()
+    # model = TestModel()
+    cfg = ModelConfig(subvolume_size=128,
+                      patch_size=32,
+                      hidden_size=64,
+                      mlp_dim=256,
+                      num_layers=8,
+                      num_heads=8,
+                      attention_dropout_rate=0.3,
+                      dropout_rate=0.3,
+                      layer_norm_eps=1e-6,
+                      head_channels=512,
+                      device=device)
+    model = TransUNet3D(cfg=cfg)
 
     # Load saved model if applicable
     if args.continue_from_checkpoint:
@@ -117,10 +132,14 @@ def main_worker(rank, world_size):
 
     # Load datasets
     dataset = MSSeg2Dataset(root=args.dataset_root,
-                            patch_size=(128, 128, 128),
-                            stride_size=(64, 64, 64),
                             center_crop_size=(320, 384, 512),
-                            fraction_data=args.fraction_data)
+                            subvolume_size=(128, 128, 128),
+                            stride_size=(64, 64, 64),
+                            patch_size=(32, 32, 32),
+                            fraction_data=args.fraction_data,
+                            gt_type=args.gt_type,
+                            use_patches=True,
+                            seed=args.seed)
 
     train_dataset, val_dataset = split_dataset(dataset=dataset, val_size=0.3, seed=args.seed)
     # TODO: We also need test set, right?
@@ -161,68 +180,132 @@ def main_worker(rank, world_size):
     optimizer = AdamW(grouped_model_parameters)
     num_training_steps = int(args.num_epochs * len(train_dataset) / args.batch_size)
     num_warmup_steps = 0  # int(num_training_steps * 0.02)
+    # TODO: Explore warm-up
     scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
                                                 num_warmup_steps=num_warmup_steps,
                                                 num_training_steps=num_training_steps)
 
-    # Setup loss function
-    criterion = AdapWingLoss(theta=0.5, alpha=2.1, omega=14, epsilon=1)
+    # Setup loss function(s)
+    clf_criterion = nn.CrossEntropyLoss(weight=torch.tensor([1.0, 100.0]).cuda())
+    # NOTE: Using weighted loss to add more prevalence to positive patches
+
+    seg_criterion = AdapWingLoss(theta=0.5, alpha=2.1, omega=14, epsilon=1)
     # TODO: The above params for the AdapWingLoss() are default given by `ivadomed`. Can
     #       we improve them for our application?
 
     # Setup other metrics
     dice_metric = DiceLoss(smooth=1.0)
 
+    # Set scaler for mixed-precision training
+    # NOTE: Check https://spell.ml/blog/mixed-precision-training-with-pytorch-Xuk7YBEAACAASJam
+    scaler = torch.cuda.amp.GradScaler()
+
     # Training & Evaluation
     for i in tqdm(range(args.num_epochs), desc='Iterating over Epochs'):
         # -------------------------------- TRAINING ------------------------------------
         model.train()
-        train_epoch_loss = 0.0
-        train_epoch_dice = 0.0
+        dataset.train = True
+        train_epoch_losses = {'clf': 0.0, 'seg': 0.0, 'dice': 0.0}
+        train_epoch_accuracies = {'acc': 0.0, 'pos_acc': 0.0, 'neg_acc': 0.0}
 
         for batch in tqdm(train_loader, desc='Iterating over Training Examples'):
             optimizer.zero_grad()
 
-            x1, x2, y = batch
-            x1, x2, y = x1.to(device), x2.to(device), y.to(device)
+            x1, x2, seg_y, clf_y = batch
+            x1, x2, seg_y, clf_y = x1.to(device), x2.to(device), seg_y.to(device), clf_y.to(device)
 
-            y_hat = model(x1, x2)
+            # Unsqueeze input patches in the channel dimension
+            x1, x2 = x1.unsqueeze(2), x2.unsqueeze(2)
 
-            loss = criterion(y_hat, y)
-            loss.backward()
-            optimizer.step()
+            with torch.cuda.amp.autocast():
+                clf_y_hat, seg_y_hat = model(x1, x2)
 
-            train_epoch_loss += loss.item()
-            train_epoch_dice += dice_metric(y_hat, y).item()
+                # Get baseline estimate of segmentation maps with classification logits
+                # clf_seg_y_hat = torch.zeros_like(seg_y).to(device)
+                # clf_seg_y_hat += torch.argmax(clf_y_hat, dim=-1)[:, cfg.num_patches:]
+                # loss = seg_criterion(clf_seg_y_hat, seg_y)
 
-        train_epoch_loss /= len(train_loader)
-        train_epoch_dice /= len(train_loader)
+                clf_loss = clf_criterion(clf_y_hat.permute(0, 2, 1), clf_y)
+                seg_loss = seg_criterion(seg_y_hat, seg_y)
+                loss = clf_loss + seg_loss
 
+            # loss.backward()
+            scaler.scale(loss).backward()
+
+            # optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
+
+            # Update metrics
+            train_epoch_losses['clf'] += clf_loss.item()
+            train_epoch_losses['seg'] += seg_loss.item()
+            train_epoch_losses['dice'] += dice_metric(seg_y_hat, seg_y).item()
+
+            acc, pos_acc, neg_acc = binary_accuracy(clf_y_hat, clf_y)
+            train_epoch_accuracies['acc'] += acc.item()
+            train_epoch_accuracies['pos_acc'] += pos_acc.item()
+            train_epoch_accuracies['neg_acc'] += neg_acc.item()
+
+        for key in train_epoch_losses:
+            train_epoch_losses[key] /= len(train_loader)
+        for key in train_epoch_accuracies:
+            train_epoch_accuracies[key] /= len(train_loader)
         # -------------------------------- EVALUATION ------------------------------------
         model.eval()
-        val_epoch_loss = 0.0
-        val_epoch_dice = 0.0
+        dataset.train = False
+        val_epoch_losses = {'clf': 0.0, 'seg': 0.0, 'dice': 0.0}
+        val_epoch_accuracies = {'acc': 0.0, 'pos_acc': 0.0, 'neg_acc': 0.0}
 
         with torch.no_grad():
             for batch in tqdm(val_loader, desc='Iterating over Validation Examples'):
-                x1, x2, y = batch
-                x1, x2, y = x1.to(device), x2.to(device), y.to(device)
+                x1, x2, seg_y, clf_y = batch
+                x1, x2, seg_y, clf_y = x1.to(device), x2.to(device), seg_y.to(device), clf_y.to(device)
 
-                y_hat = model(x1, x2)
+                # Unsqueeze input patches in the channel dimension
+                x1, x2 = x1.unsqueeze(2), x2.unsqueeze(2)
 
-                loss = criterion(y_hat, y)
+                with torch.cuda.amp.autocast():
+                    clf_y_hat, seg_y_hat = model(x1, x2)
 
-                val_epoch_loss += loss.item()
-                val_epoch_dice += dice_metric(y_hat, y).item()
+                    # Get baseline estimate of segmentation maps with classification logits
+                    # clf_seg_y_hat = torch.zeros_like(seg_y).float().to(device)
+                    # clf_seg_y_hat += torch.argmax(clf_y_hat, dim=-1)[:, cfg.num_patches:].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).float()
+                    # clf_seg_y_hat += torch.argmax(clf_y_hat, dim=-1)[:, cfg.num_patches:].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).float()
+                    # clf_seg_y_hat *= torch.max(clf_y_hat, dim=-1).values[:, cfg.num_patches:].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).float()
+                    # print(seg_y.shape)
+                    # print(torch.argmax(clf_y_hat, dim=-1)[:, cfg.num_patches:].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1))
+                    # TODO: Do the above unsqueeze more elegantly...
+                    # loss = seg_criterion(clf_seg_y_hat, seg_y)
 
-        val_epoch_loss /= len(val_loader)
-        val_epoch_dice /= len(val_loader)
+                    clf_loss = clf_criterion(clf_y_hat.permute(0, 2, 1), clf_y)
+                    seg_loss = seg_criterion(seg_y_hat, seg_y)
+                    loss = clf_loss + seg_loss
+
+                # Update metrics
+                val_epoch_losses['clf'] += clf_loss.item()
+                val_epoch_losses['seg'] += seg_loss.item()
+                val_epoch_losses['dice'] += dice_metric(seg_y_hat, seg_y).item()
+
+                acc, pos_acc, neg_acc = binary_accuracy(clf_y_hat, clf_y)
+                val_epoch_accuracies['acc'] += acc.item()
+                val_epoch_accuracies['pos_acc'] += pos_acc.item()
+                val_epoch_accuracies['neg_acc'] += neg_acc.item()
+
+        for key in val_epoch_losses:
+            val_epoch_losses[key] /= len(val_loader)
+        for key in val_epoch_accuracies:
+            val_epoch_accuracies[key] /= len(val_loader)
 
         torch.save(model.state_dict(), os.path.join(args.save, '%s.pt' % model_id))
 
         print('\n')  # Do this in order to go below the second tqdm line
-        print(f'\tTrain Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_loss, val_epoch_loss))
-        print(f'\tTrain Dice: %0.4f | Validation Dice: %0.4f' % (train_epoch_dice, val_epoch_dice))
+        print(f'\t[CFL] -> Train Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_losses['clf'], val_epoch_losses['clf']))
+        print(f'\t[SEG] -> Train Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_losses['seg'], val_epoch_losses['seg']))
+        print(f'\t[DICE] -> Train Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_losses['dice'], val_epoch_losses['dice']))
+
+        print(f'\t[CLF] -> Train Accuracy: {train_epoch_accuracies["acc"] * 100:.2f}% | Validation Accuracy: {val_epoch_accuracies["acc"] * 100:.2f}%')
+        print(f'\t[CLF] -> Train Pos. Accuracy: {train_epoch_accuracies["pos_acc"] * 100:.2f}% | Validation Pos. Accuracy: {val_epoch_accuracies["pos_acc"] * 100:.2f}%')
+        print(f'\t[CLF] -> Train Neg. Accuracy: {train_epoch_accuracies["neg_acc"] * 100:.2f}% | Validation Neg. Accuracy: {val_epoch_accuracies["neg_acc"] * 100:.2f}%')
 
         # Apply learning rate decay before the beginning of next epoch if applicable
         scheduler.step()
