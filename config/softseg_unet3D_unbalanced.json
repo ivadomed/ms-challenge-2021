@@ -1,14 +1,14 @@
 {
     "command": "train",
-    "gpu_ids": [0],
-    "log_directory": "msc2021_softseg_unet3D_unbalanced",
+    "gpu_ids": [2],
+    "log_directory": "results/msc2021_softseg_unet3D_unbalanced",
     "model_name": "ms_brain",
     "debugging": true,
     "object_detection_params": {
         "object_detection_path": null
     },
     "loader_parameters": {
-        "bids_path": "duke/projects/ivadomed/tmp_ms_challenge_2021_preprocessed",
+        "path_data": "duke/projects/ivadomed/tmp_ms_challenge_2021_preprocessed",
         "target_suffix": ["_seg-lesion"],
         "roi_params": {
             "suffix": null,
@@ -32,30 +32,33 @@
         "fname_split": null,
         "random_seed": 42,
         "center_test": [],
-	"balance": null,
+	    "balance": null,
         "method": "per_patient",
         "train_fraction": 0.6,
         "test_fraction": 0.2
     },
     "training_parameters": {
-        "batch_size": 20,
+        "batch_size": 16,
         "loss": {
             "name": "AdapWingLoss"
         },
         "training_time": {
             "num_epochs": 200,
-            "early_stopping_patience": 50,
+            "early_stopping_patience": 75,
             "early_stopping_epsilon": 0.001
         },
         "scheduler": {
-            "initial_lr": 5e-05,
+            "initial_lr": 2e-04,
             "lr_scheduler": {
                 "name": "CosineAnnealingLR",
-                "base_lr": 1e-05,
+                "base_lr": 5e-05,
                 "max_lr": 0.01
             }
         },
-        "balance_samples": {"applied": false, "type": "gt"},
+        "balance_samples": {
+            "applied": false,
+            "type": "gt"
+        },
         "mixup_alpha": null,
         "transfer_learning": {
             "retrain_model": null,
@@ -64,14 +67,14 @@
     },
     "Modified3DUNet": {
         "applied": true,
-        "length_3D": [128, 128, 128],
-        "stride_3D": [64, 64, 64],
+        "length_3D": [64, 64, 64],
+        "stride_3D": [32, 32, 32],
         "attention": true,
-        "n_filters": 8
+        "n_filters": 16
     },
     "default_model": {
         "name": "Unet",
-        "dropout_rate": 0.3,
+        "dropout_rate": 0.2,
         "bn_momentum": 0.9,
         "depth": 4,
         "folder_name": "ms_brain",
@@ -79,41 +82,26 @@
         "out_channel": 1,
         "final_activation": "relu"
     },
-    "postprocessing": {"binarize_prediction": {"thr": 0.5}},
+    "postprocessing": {
+        "binarize_prediction": {"thr": 0.5}
+    },
     "transformation": {
         "CenterCrop": {
-            "size": [
-                320,
-                384,
-                512
-            ],
+            "size": [ 320, 384, 512 ],
             "preprocessing": true
         },
         "RandomAffine": {
             "degrees": 20,
-            "scale": [
-                0.1,
-                0.1,
-                0.1
-            ],
-            "translate": [
-                0.1,
-                0.1,
-                0.1
-            ],
-            "applied_to": [
-                "im",
-                "gt"
-            ],
-            "dataset_type": [
-                "training"
-            ]
+            "scale": [ 0.1, 0.1, 0.1 ],
+            "translate": [ 0.1, 0.1, 0.1 ],
+            "applied_to": [ "im", "gt" ],
+            "dataset_type": [ "training" ]
         },
-        "NumpyToTensor": {},
+        "NumpyToTensor": {
+            "applied_to": ["im", "gt"]
+        },
         "NormalizeInstance": {
-            "applied_to": [
-                "im"
-            ]
+            "applied_to": [ "im" ]
         }
     }
 }
