@@ -25,10 +25,10 @@ parser.add_argument('-id', '--model_id', default='punet', type=str,
 parser.add_argument('-dr', '--dataset_root',
                     default='/home/GRAMES.POLYMTL.CA/u114716/duke/projects/ivadomed/tmp_ms_challenge_2021_preprocessed',
                     type=str, help='Root path to the BIDS- and ivadomed-compatible dataset')
-parser.add_argument('-fd', '--fraction_data', default=0.1, type=float, help='Fraction of data to use (for debugging)')
+parser.add_argument('-fd', '--fraction_data', default=1.0, type=float, help='Fraction of data to use (for debugging)')
 
 parser.add_argument('-ne', '--num_epochs', default=20, type=int, help='Number of epochs for the training process')
-parser.add_argument('-bs', '--batch_size', default=4, type=int, help='Batch size for training and validation processes')
+parser.add_argument('-bs', '--batch_size', default=8, type=int, help='Batch size for training and validation processes')
 parser.add_argument('-nw', '--num_workers', default=4, type=int, help='Number of workers for the dataloaders')
 
 parser.add_argument('-lr', '--learning_rate', default=1e-4, type=float, help='Learning rate for training')
@@ -166,6 +166,9 @@ def main_worker(rank, world_size):
     # Setup other metrics
     dice_metric = DiceLoss(smooth=1.0)
 
+    # for mixed-precision training
+    scaler = torch.cuda.amp.GradScaler()
+
     # Training & Evaluation
     for i in tqdm(range(args.num_epochs), desc='Iterating over Epochs'):
         # -------------------------------- TRAINING ------------------------------------
@@ -186,16 +189,22 @@ def main_worker(rank, world_size):
             x = torch.cat([x1, x2], dim=1).to(device)       # size of x: (B x 2 x P x P x P)
             # print(x.shape)
 
-            model.forward(patch=x, seg_mask=y, training=True)
+            with torch.cuda.amp.autocast():
+                model.forward(patch=x, seg_mask=y, training=True)
 
-            y_hat, elbo = model.elbo(y)     # y_hat is the reconstructed mask - shape: (B x 1 x P x P x P)
-            reg_loss = l2_regularization(model.posterior) + l2_regularization(model.prior) + \
-                       l2_regularization(model.fcomb.layers)
-            loss = -elbo + 1e-5 * reg_loss
+                y_hat, elbo = model.elbo(y)     # y_hat is the reconstructed mask - shape: (B x 1 x P x P x P)
+                reg_loss = l2_regularization(model.posterior) + l2_regularization(model.prior) + \
+                    l2_regularization(model.fcomb.layers)
+                loss = -elbo + 1e-5 * reg_loss
 
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            # Backprop in Mixed-Precision training
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            # Backprop in Standard training
+            # loss.backward()
+            # optimizer.step()
 
             train_epoch_loss += loss.item()
             train_epoch_dice += dice_metric(y_hat, y).item()
@@ -221,18 +230,22 @@ def main_worker(rank, world_size):
                 x1, x2 = x1.unsqueeze(dim=1), x2.unsqueeze(dim=1)
                 x = torch.cat([x1, x2], dim=1).to(device)
 
-                model.forward(patch=x, seg_mask=None, training=False)
+                with torch.cuda.amp.autocast():
+                    model.forward(patch=x, seg_mask=None, training=False)
 
-                num_predictions = 5     # NP
-                predictions = []
-                for _ in range(num_predictions):
-                    mask_pred = model.sample(testing=True)
-                    mask_pred = (torch.sigmoid(mask_pred) > 0.5).float()    # shape: (B x 1 x P x P x P)
-                    predictions.append(mask_pred)
-                predictions = torch.cat(predictions, dim=1)     # shape: (B x NP x P x P x P)
+                    num_predictions = 5     # NP
+                    predictions = []
+                    for _ in range(num_predictions):
+                        mask_pred = model.sample(testing=True)
+                        # TODO: this line below gets hard predictions. Use just sigmoid and see how Dice performs.
+                        mask_pred = torch.sigmoid(mask_pred)    # getting a soft pred. ; shape: (B x 1 x P x P x P)
+                        # uncomment the line below for getting hard predictions.
+                        # mask_pred = (torch.sigmoid(mask_pred) > 0.5).float()    # shape: (B x 1 x P x P x P)
+                        predictions.append(mask_pred)
+                    predictions = torch.cat(predictions, dim=1)     # shape: (B x NP x P x P x P)
 
-                y_pred = torch.squeeze(torch.mean(predictions, dim=1))    # y_pred is the mean of all NP predictions
-                # shape: (B x P x P x P)
+                    y_pred = torch.squeeze(torch.mean(predictions, dim=1))    # y_pred is the mean of all NP predictions
+                    # shape: (B x P x P x P)
 
                 val_epoch_dice += dice_metric(y_pred, y)
 
