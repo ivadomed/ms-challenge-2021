@@ -1,3 +1,4 @@
+"""Implements various models for the MSSeg2021 challenge."""
 import copy
 import math
 
@@ -16,13 +17,35 @@ ACT2FN = {"gelu": F.gelu, "relu": F.relu, "swish": swish}
 
 
 class ModelConfig(object):
-    """Model Config with TransUNet3D-specific hyperparameters. Infers num. patches / num. tokens."""
-    def __init__(self, subvolume_size, patch_size,
-                 hidden_size, mlp_dim,
-                 num_layers, num_heads, attention_dropout_rate,
-                 dropout_rate, layer_norm_eps,
-                 head_channels,
-                 device):
+    """
+    Model configuration with model-specific parameters and hyperparameters. Used for Modified3DUNet
+    and TransUNet3D for now. Computes num. patches and the output dimension of Modified3DUNet
+    encoder for the TransUNet3D model.
+
+    NOTE: We are following the volume -> subvolume -> patch analogy where volume is the initial
+    input image (i.e. full scan of patient), subvolume is a piece of volume utilized by models such
+    as Modified3DUNet, and patch is a piece of subvolume utilized by models such as TransUNet3D.
+
+    :param (str) task: '1' for any-lesion segmentation task on MSSeg2016 and
+                       '2' for new-lesion segmentation task on MSSeg2021 challenge.
+    :param (int) subvolume_size: The size of the subvolume, denoted as SV.
+    :param (int) patch_size: The size of the patch, denoted as P. (TransUNet3D-specific)
+    :param (int) hidden_size: Hidden dim. size of transformer embeddings and outputs, denoted as H. (TransUNet3D-specific)
+    :param (int) mlp_dim: Hidden dim. size of transformer block. (TransUNet3D-specific)
+    :param (int) num_layers: Num. of transformer blocks that constitute the encoder, denoted as L. (TransUNet3D-specific)
+    :param (int) num_heads: Num. attention heads for multi-head attention mechanism, denoted as AH. (TransUNet3D-specific)
+    :param (float) attention_dropout_rate: Dropout rate for attention layers. (TransUNet3D-specific)
+    :param (float) dropout_rate: Dropout rate for transformer embeddings and outputs. (TransUNet3D-specific)
+    :param (float) layer_norm_eps: Epsilon for layer norm in transformer. (TransUNet3D-specific)
+    :param (bool) aux_clf_task: Set True to include the auxiliary subvolume / patch classification task.
+           This task tries to classify subvolumes / patches with 1 if lesion is present or 0 if not.
+    :param (int) base_n_filter: Base number of filters for the ModifiedUNet3D encoder and decoders, denoted as F.
+    :param (torch.device) device: Device on which to place the tensors.
+    """
+    def __init__(self, task, subvolume_size, patch_size, hidden_size, mlp_dim, num_layers,
+                 num_heads, attention_dropout_rate, dropout_rate, layer_norm_eps, aux_clf_task,
+                 base_n_filter, device):
+        self.task = task
         self.subvolume_size = subvolume_size
         self.patch_size = patch_size
         self.hidden_size = hidden_size
@@ -32,12 +55,18 @@ class ModelConfig(object):
         self.num_heads = num_heads
         self.dropout_rate = dropout_rate
         self.layer_norm_eps = layer_norm_eps
-        self.head_channels = head_channels
+        self.aux_clf_task = aux_clf_task
+        self.base_n_filter = base_n_filter
         self.device = device
 
         self.num_patches = (self.subvolume_size // self.patch_size) ** 3
+        self.unet_encoder_out_dim = base_n_filter * 8 * ((self.patch_size // 8) ** 3)
+
+        print('Num. Patches: ', self.num_patches)
+        print('UNet3D Encoder Output Dim.: ', self.unet_encoder_out_dim)
 
 
+# ---------------------------- Test Model Implementation -----------------------------
 class TestModel(nn.Module):
     """Simple test model with 3D convolutions and up-convolutions, to-be used for debugging."""
     def __init__(self):
@@ -67,48 +96,335 @@ class TestModel(nn.Module):
         return y_hat
 
 
+# ---------------------------- Helpers Implementation -----------------------------
+def seq2batch(x):
+    """Converts 6D tensor of size [B, S, C, P, P, P] to 5D tensor of size [B * S, C, P, P, P]"""
+    return x.view(x.size(0) * x.size(1), *x.size()[2:])
+
+
+def batch2seq(x, num_patches):
+    """Converts 5D tensor of size [B * S, C, P, P, P] to 6D tensor of size [B, S, C, P, P, P]"""
+    return x.view(-1, num_patches, *x.size()[1:])
+
+
+def conv_norm_lrelu(feat_in, feat_out):
+    """Conv3D + InstanceNorm3D + LeakyReLU block"""
+    return nn.Sequential(
+        nn.Conv3d(feat_in, feat_out, kernel_size=3, stride=1, padding=1, bias=False),
+        nn.InstanceNorm3d(feat_out),
+        nn.LeakyReLU()
+    )
+
+
+def norm_lrelu_conv(feat_in, feat_out):
+    """InstanceNorm3D + LeakyReLU + Conv3D block"""
+    return nn.Sequential(
+        nn.InstanceNorm3d(feat_in),
+        nn.LeakyReLU(),
+        nn.Conv3d(feat_in, feat_out, kernel_size=3, stride=1, padding=1, bias=False)
+    )
+
+
+def lrelu_conv(feat_in, feat_out):
+    """LeakyReLU + Conv3D block"""
+    return nn.Sequential(
+        nn.LeakyReLU(),
+        nn.Conv3d(feat_in, feat_out, kernel_size=3, stride=1, padding=1, bias=False)
+    )
+
+
+def norm_lrelu_upscale_conv_norm_lrelu(feat_in, feat_out):
+    """InstanceNorm3D + LeakyReLU + 2X Upsample + Conv3D + InstanceNorm3D + LeakyReLU block"""
+    return nn.Sequential(
+        nn.InstanceNorm3d(feat_in),
+        nn.LeakyReLU(),
+        nn.Upsample(scale_factor=2, mode='nearest'),
+        nn.Conv3d(feat_in, feat_out, kernel_size=3, stride=1, padding=1, bias=False),
+        nn.InstanceNorm3d(feat_out),
+        nn.LeakyReLU()
+    )
+
+
+# ---------------------------- ModifiedUNet3D Encoder Implementation -----------------------------
+class ModifiedUNet3DEncoder(nn.Module):
+    """Encoder for ModifiedUNet3D. Adapted from ivadomed.models"""
+    def __init__(self, cfg, in_channels=1, base_n_filter=8, flatten=True):
+        super(ModifiedUNet3DEncoder, self).__init__()
+        self.cfg = cfg
+
+        self.flatten = flatten
+
+        # Initialize common operations
+        self.lrelu = nn.LeakyReLU()
+        self.dropout3d = nn.Dropout3d(p=0.5)
+        self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
+
+        # Level 1 context pathway
+        self.conv3d_c1_1 = nn.Conv3d(in_channels, base_n_filter, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv3d_c1_2 = nn.Conv3d(base_n_filter, base_n_filter, kernel_size=3, stride=1, padding=1, bias=False)
+        self.lrelu_conv_c1 = lrelu_conv(base_n_filter, base_n_filter)
+        self.inorm3d_c1 = nn.InstanceNorm3d(base_n_filter)
+
+        # Level 2 context pathway
+        self.conv3d_c2 = nn.Conv3d(base_n_filter, base_n_filter * 2, kernel_size=3, stride=2, padding=1, bias=False)
+        self.norm_lrelu_conv_c2 = norm_lrelu_conv(base_n_filter * 2, base_n_filter * 2)
+        self.inorm3d_c2 = nn.InstanceNorm3d(base_n_filter * 2)
+
+        # Level 3 context pathway
+        self.conv3d_c3 = nn.Conv3d(base_n_filter * 2, base_n_filter * 4, kernel_size=3, stride=2, padding=1, bias=False)
+        self.norm_lrelu_conv_c3 = norm_lrelu_conv(base_n_filter * 4, base_n_filter * 4)
+        self.inorm3d_c3 = nn.InstanceNorm3d(base_n_filter * 4)
+
+        # Level 4 context pathway
+        self.conv3d_c4 = nn.Conv3d(base_n_filter * 4, base_n_filter * 8, kernel_size=3, stride=2, padding=1, bias=False)
+        self.norm_lrelu_conv_c4 = norm_lrelu_conv(base_n_filter * 8, base_n_filter * 8)
+        self.inorm3d_c4 = nn.InstanceNorm3d(base_n_filter * 8)
+
+        # Level 5 context pathway, level 0 localization pathway
+        self.conv3d_c5 = nn.Conv3d(base_n_filter * 8, base_n_filter * 16, kernel_size=3, stride=2, padding=1, bias=False)
+        self.norm_lrelu_conv_c5 = norm_lrelu_conv(base_n_filter * 16, base_n_filter * 16)
+        self.norm_lrelu_upscale_conv_norm_lrelu_l0 = norm_lrelu_upscale_conv_norm_lrelu(base_n_filter * 16, base_n_filter * 8)
+
+        if self.flatten:
+            self.fc = nn.Linear(self.cfg.unet_encoder_out_dim, self.cfg.unet_encoder_out_dim)
+
+    def forward(self, x):
+        #  Level 1 context pathway
+        out = self.conv3d_c1_1(x)
+        residual_1 = out
+        out = self.lrelu(out)
+        out = self.conv3d_c1_2(out)
+        out = self.dropout3d(out)
+        out = self.lrelu_conv_c1(out)
+
+        # Element Wise Summation
+        out += residual_1
+        context_1 = self.lrelu(out)
+        out = self.inorm3d_c1(out)
+        out = self.lrelu(out)
+
+        # Level 2 context pathway
+        out = self.conv3d_c2(out)
+        residual_2 = out
+        out = self.norm_lrelu_conv_c2(out)
+        out = self.dropout3d(out)
+        out = self.norm_lrelu_conv_c2(out)
+        out += residual_2
+        out = self.inorm3d_c2(out)
+        out = self.lrelu(out)
+        context_2 = out
+
+        # Level 3 context pathway
+        out = self.conv3d_c3(out)
+        residual_3 = out
+        out = self.norm_lrelu_conv_c3(out)
+        out = self.dropout3d(out)
+        out = self.norm_lrelu_conv_c3(out)
+        out += residual_3
+        out = self.inorm3d_c3(out)
+        out = self.lrelu(out)
+        context_3 = out
+
+        # Level 4 context pathway
+        out = self.conv3d_c4(out)
+        residual_4 = out
+        out = self.norm_lrelu_conv_c4(out)
+        out = self.dropout3d(out)
+        out = self.norm_lrelu_conv_c4(out)
+        out += residual_4
+        out = self.inorm3d_c4(out)
+        out = self.lrelu(out)
+        context_4 = out
+
+        # Level 5
+        out = self.conv3d_c5(out)
+        residual_5 = out
+        out = self.norm_lrelu_conv_c5(out)
+        out = self.dropout3d(out)
+        out = self.norm_lrelu_conv_c5(out)
+        out += residual_5
+        out = self.norm_lrelu_upscale_conv_norm_lrelu_l0(out)
+
+        context_features = [context_1, context_2, context_3, context_4]
+
+        # TODO: Think about this section more, e.g. do we need act. fn. after the self.fc call?
+        # NOTE: Flatten is only active for TransUNet3D, not for ModifiedUNet3D.
+        if self.flatten:
+            context_out = out
+            out = out.flatten(start_dim=1)
+            out = self.lrelu(self.fc(out))
+
+            return out, context_out, context_features
+
+        return out, context_features
+
+
+# ---------------------------- ModifiedUNet3D Decoder Implementation -----------------------------
+class ModifiedUNet3DDecoder(nn.Module):
+    """Decoder for ModifiedUNet3D. Adapted from ivadomed.models"""
+    def __init__(self, cfg, n_classes=1, base_n_filter=8):
+        super(ModifiedUNet3DDecoder, self).__init__()
+        self.cfg = cfg
+
+        # Initialize common operations
+        self.lrelu = nn.LeakyReLU()
+        self.dropout3d = nn.Dropout3d(p=0.5)
+        self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
+
+        self.conv3d_l0 = nn.Conv3d(base_n_filter * 8, base_n_filter * 8, kernel_size=1, stride=1, padding=0, bias=False)
+        self.inorm3d_l0 = nn.InstanceNorm3d(base_n_filter * 8)
+
+        # Level 1 localization pathway
+        self.conv_norm_lrelu_l1 = conv_norm_lrelu(base_n_filter * 16, base_n_filter * 16)
+        self.conv3d_l1 = nn.Conv3d(base_n_filter * 16, base_n_filter * 8, kernel_size=1, stride=1, padding=0, bias=False)
+        self.norm_lrelu_upscale_conv_norm_lrelu_l1 = norm_lrelu_upscale_conv_norm_lrelu(base_n_filter * 8, base_n_filter * 4)
+
+        # Level 2 localization pathway
+        self.conv_norm_lrelu_l2 = conv_norm_lrelu(base_n_filter * 8, base_n_filter * 8)
+        self.conv3d_l2 = nn.Conv3d(base_n_filter * 8, base_n_filter * 4, kernel_size=1, stride=1, padding=0, bias=False)
+        self.norm_lrelu_upscale_conv_norm_lrelu_l2 = norm_lrelu_upscale_conv_norm_lrelu(base_n_filter * 4, base_n_filter * 2)
+
+        # Level 3 localization pathway
+        self.conv_norm_lrelu_l3 = conv_norm_lrelu(base_n_filter * 4, base_n_filter * 4)
+        self.conv3d_l3 = nn.Conv3d(base_n_filter * 4, base_n_filter * 2, kernel_size=1, stride=1, padding=0, bias=False)
+        self.norm_lrelu_upscale_conv_norm_lrelu_l3 = norm_lrelu_upscale_conv_norm_lrelu(base_n_filter * 2, base_n_filter)
+
+        # Level 4 localization pathway
+        self.conv_norm_lrelu_l4 = conv_norm_lrelu(base_n_filter * 2, base_n_filter * 2)
+        self.conv3d_l4 = nn.Conv3d(base_n_filter * 2, n_classes, kernel_size=1, stride=1, padding=0, bias=False)
+
+        self.ds2_1x1_conv3d = nn.Conv3d(base_n_filter * 8, n_classes, kernel_size=1, stride=1, padding=0, bias=False)
+        self.ds3_1x1_conv3d = nn.Conv3d(base_n_filter * 4, n_classes, kernel_size=1, stride=1, padding=0, bias=False)
+
+    def forward(self, x, context_features):
+        # Get context features from the encoder
+        context_1, context_2, context_3, context_4 = context_features
+
+        out = self.conv3d_l0(x)
+        out = self.inorm3d_l0(out)
+        out = self.lrelu(out)
+
+        # Level 1 localization pathway
+        out = torch.cat([out, context_4], dim=1)
+        out = self.conv_norm_lrelu_l1(out)
+        out = self.conv3d_l1(out)
+        out = self.norm_lrelu_upscale_conv_norm_lrelu_l1(out)
+
+        # Level 2 localization pathway
+        out = torch.cat([out, context_3], dim=1)
+        out = self.conv_norm_lrelu_l2(out)
+        ds2 = out
+        out = self.conv3d_l2(out)
+        out = self.norm_lrelu_upscale_conv_norm_lrelu_l2(out)
+
+        # Level 3 localization pathway
+        out = torch.cat([out, context_2], dim=1)
+        out = self.conv_norm_lrelu_l3(out)
+        ds3 = out
+        out = self.conv3d_l3(out)
+        out = self.norm_lrelu_upscale_conv_norm_lrelu_l3(out)
+
+        # Level 4 localization pathway
+        out = torch.cat([out, context_1], dim=1)
+        out = self.conv_norm_lrelu_l4(out)
+        out_pred = self.conv3d_l4(out)
+
+        ds2_1x1_conv = self.ds2_1x1_conv3d(ds2)
+        ds1_ds2_sum_upscale = self.upsample(ds2_1x1_conv)
+        ds3_1x1_conv = self.ds3_1x1_conv3d(ds3)
+        ds1_ds2_sum_upscale_ds3_sum = ds1_ds2_sum_upscale + ds3_1x1_conv
+        ds1_ds2_sum_upscale_ds3_sum_upscale = self.upsample(ds1_ds2_sum_upscale_ds3_sum)
+
+        out = out_pred + ds1_ds2_sum_upscale_ds3_sum_upscale
+
+        # Final Activation Layer
+        out = F.relu(out) / F.relu(out).max() if bool(F.relu(out).max()) else F.relu(out)
+        out = out.squeeze()
+
+        return out
+
+
+# ---------------------------- ModifiedUNet3D Implementation -----------------------------
+class ModifiedUNet3D(nn.Module):
+    """ModifiedUNet3D with Encoder + Decoder. Adapted from ivadomed.models"""
+    def __init__(self, cfg):
+        super(ModifiedUNet3D, self).__init__()
+        self.cfg = cfg
+
+        self.unet_encoder = ModifiedUNet3DEncoder(cfg, in_channels=1 if cfg.task == '1' else 2, base_n_filter=cfg.base_n_filter, flatten=False)
+
+        if self.cfg.aux_clf_task:
+            self.clf = ClassificationPredictionHead(cfg)
+
+        self.unet_decoder = ModifiedUNet3DDecoder(cfg, n_classes=1, base_n_filter=cfg.base_n_filter)
+
+    def forward(self, x1, x2):
+        # x1: (B, 1, SV, SV, SV)
+        # x2: (B, 1, SV, SV, SV)
+
+        if self.cfg.task == '2':
+            # Concat. TPs
+            x = torch.cat([x1, x2], dim=1).to(self.cfg.device)
+            # x: (B, 2, SV, SV, SV)
+        else:
+            # Discard x2
+            x = x1
+            # x: (B, 1, SV, SV, SV)
+
+        x, context_features = self.unet_encoder(x)
+        # x: (B, 8 * F, SV // 8, SV // 8, SV // 8)
+        # context_features: [4]
+        #   0 -> (B, F, SV, SV, SV)
+        #   1 -> (B, 2 * F, SV / 2, SV / 2, SV / 2)
+        #   2 -> (B, 4 * F, SV / 4, SV / 4, SV / 4)
+        #   3 -> (B, 8 * F, SV / 8, SV / 8, SV / 8)
+
+        seg_logits = self.unet_decoder(x, context_features)
+
+        return seg_logits
+
+
 # -------------------------------- TransUNet3D Implementation --------------------------------
 class Embeddings(nn.Module):
-    """Construct the embeddings from patch, position embeddings."""
+    """Transformer Embeddings. Constructs (i) patch, (ii) position, and (iii) timepoint embeddings."""
     def __init__(self, cfg):
         super(Embeddings, self).__init__()
         self.cfg = cfg
 
-        self.feature_extractor = VideoResNet(block=BasicBlock, conv_makers=[Conv3DSimple] * 4, layers=[2, 2, 2, 2])
+        self.unet_encoder = ModifiedUNet3DEncoder(cfg, in_channels=1, base_n_filter=cfg.base_n_filter, flatten=True)
 
-        self.patch_embeddings = nn.Linear(in_features=512, out_features=cfg.hidden_size)
+        self.patch_embeddings = nn.Linear(in_features=cfg.unet_encoder_out_dim, out_features=cfg.hidden_size)
         self.position_embeddings = nn.Embedding(cfg.num_patches, cfg.hidden_size)
         self.timepoint_embeddings = nn.Embedding(2, cfg.hidden_size)
 
-        # self.layer_norm = nn.LayerNorm(cfg.hidden_size, eps=cfg.layer_norm_eps)
-        # TODO: Should we utilize layer-norm here?
+        self.layer_norm = nn.LayerNorm(cfg.hidden_size, eps=cfg.layer_norm_eps)
 
         self.dropout = nn.Dropout(cfg.dropout_rate)
 
     def forward(self, x, position_ids, timepoint_ids):
-        # x: (B, 2 * S, 3, P, P, P)
+        # x: (B, 2 * S, 1, P, P, P)
         # position_ids: (1, 2 * S)
         # timepoint_ids: (1, 2 * S)
 
-        # Pass all patches in all batches through feat. extractor in parallel
-        x, features = self.feature_extractor(x.view(-1, 3, self.cfg.patch_size, self.cfg.patch_size, self.cfg.patch_size))
-        # x: (2 * B * S, 512)
-        # features: [4]
-        x = F.relu(x)
-        # x: (2 * B * S, 512)
-        # TODO: Verify that ReLU makes sense here
-        # TODO: Get features from the feature extractor
+        x = seq2batch(x)
+        # x: (2 * B * S, 1, P, P, P)
+
+        x, context_out, context_features = self.unet_encoder(x)
+        # x: (2 * B * S, 8 * F * (P / 8) * (P / 8) * (P / 8))
+        # context_out: (2 * B * S, 8 * F, P / 8, P / 8, P / 8)
+        # context_features: [4]
+        #   0 -> (2 * B * S, F, P, P, P)
+        #   1 -> (2 * B * S, 2 * F, P / 2, P / 2, P / 2)
+        #   2 -> (2 * B * S, 4 * F, P / 4, P / 4, P / 4)
+        #   3 -> (2 * B * S, 8 * F, P / 8, P / 8, P / 8)
 
         # Return to the original shape configuration
-        x = x.view(-1, 2 * self.cfg.num_patches, 512)
-        # x: (B, 2 * S, 512)
-        features = [features_.view(-1, 2 * self.cfg.num_patches, *features_.shape[1:]) for features_ in features]
-        # features: [4]
+        x = batch2seq(x, num_patches=2 * self.cfg.num_patches)
+        # x: (B, 2 * S, 8 * F * (P / 8) * (P / 8) * (P / 8))
 
         # Get final patch embeddings
         x = self.patch_embeddings(x)
         # x: (B, 2 * S, H)
-        # TODO: TransUNet implements this more efficiently with Conv2D.
 
         # Get position embeddings and timepoint embeddings
         position_x = self.position_embeddings(position_ids)
@@ -116,20 +432,25 @@ class Embeddings(nn.Module):
 
         timepoint_x = self.timepoint_embeddings(timepoint_ids)
         # timepoint_x: (1, 2 * S, H)
+        # NOTE: With these embeddings, we would like to differentiate between TP1 and TP2.
 
         # Add all embeddings together to get to the final embedding
         embeddings = x + position_x + timepoint_x
         # embeddings: (B, 2 * S, H)
 
-        # Apply dropout
+        # Apply layer norm. and dropout
+        embeddings = self.layer_norm(embeddings)
         embeddings = self.dropout(embeddings)
 
-        return embeddings, features
+        return embeddings, context_out, context_features
 
 
 class Attention(nn.Module):
+    """Multi-Head Attention"""
     def __init__(self, cfg):
         super(Attention, self).__init__()
+        self.cfg = cfg
+
         self.num_attention_heads = cfg.num_heads
         self.attention_head_size = int(cfg.hidden_size / self.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
@@ -160,6 +481,15 @@ class Attention(nn.Module):
 
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+
+        # Optional masking: we want to mask empty / zero TP2 inputs for any-lesion segmentation task
+        if self.cfg.task == '1':
+            attention_mask = torch.ones_like(attention_scores)
+            attention_mask[:, :, self.cfg.num_patches:, :] = 0
+            attention_mask[:, :, :, self.cfg.num_patches:] = 0
+            attention_scores = attention_scores.masked_fill(attention_mask == 0, -1e-9)
+            # TODO: Make sure this is OK! Reference: https://towardsdatascience.com/how-to-code-the-transformer-in-pytorch-24db27c8f9ec
+
         attention_probs = self.softmax(attention_scores)
         weights = attention_probs
         attention_probs = self.attn_dropout(attention_probs)
@@ -174,6 +504,7 @@ class Attention(nn.Module):
 
 
 class MLP(nn.Module):
+    """Multi-Layer Perceptron"""
     def __init__(self, cfg):
         super(MLP, self).__init__()
         self.fc1 = nn.Linear(cfg.hidden_size, cfg.mlp_dim)
@@ -199,6 +530,7 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
+    """Transformer Block with MLP + Attention + LayerNorm"""
     def __init__(self, cfg):
         super(Block, self).__init__()
         self.cfg = cfg
@@ -221,6 +553,7 @@ class Block(nn.Module):
 
 
 class Encoder(nn.Module):
+    """Transformer Encoder with L Blocks"""
     def __init__(self, cfg):
         super(Encoder, self).__init__()
         self.layer = nn.ModuleList()
@@ -239,6 +572,7 @@ class Encoder(nn.Module):
 
 
 class Transformer(nn.Module):
+    """Transformer: Embeddings + Encoder"""
     def __init__(self, cfg):
         super(Transformer, self).__init__()
         self.cfg = cfg
@@ -252,18 +586,23 @@ class Transformer(nn.Module):
         timepoint_ids = torch.tensor([0] * self.cfg.num_patches + [1] * self.cfg.num_patches).unsqueeze(0).to(self.cfg.device)
         # timepoint_ids: (1, 2 * S)
 
-        x, features = self.embeddings(x, position_ids, timepoint_ids)
+        x, context_out, context_features = self.embeddings(x, position_ids, timepoint_ids)
         # x: (B, 2 * S, H)
-        # features: [4]
+        # context_features: [4]
+        #   0 -> (2 * B * S, F, P, P, P)
+        #   1 -> (2 * B * S, 2 * F, P / 2, P / 2, P / 2)
+        #   2 -> (2 * B * S, 4 * F, P / 4, P / 4, P / 4)
+        #   3 -> (2 * B * S, 8 * F, P / 8, P / 8, P / 8)
 
         x, attention_weights = self.encoder(x)
         # x: (B, 2 * S, H)
-        # attention_weights: [AH]
+        # attention_weights: [AH] -> (B, B, 2 * S, 2 * S)
 
-        return x, attention_weights, features
+        return x, attention_weights, context_out, context_features
 
 
 class ClassificationPredictionHead(nn.Module):
+    """Classification Prediction Head for the auxiliary classification task."""
     def __init__(self, cfg):
         super(ClassificationPredictionHead, self).__init__()
         self.cfg = cfg
@@ -276,368 +615,59 @@ class ClassificationPredictionHead(nn.Module):
 
 
 class TransUNet3D(nn.Module):
+    """TransUNet3D implementation with Modified3DUNet + Transformer"""
     def __init__(self, cfg):
         super(TransUNet3D, self).__init__()
         self.cfg = cfg
 
         self.transformer = Transformer(cfg)
 
-        self.clf = ClassificationPredictionHead(cfg)
+        if self.cfg.aux_clf_task:
+            self.clf = ClassificationPredictionHead(cfg)
 
-        self.seg = SegmentationHead(cfg)
+        self.unet_decoder = ModifiedUNet3DDecoder(cfg, n_classes=1, base_n_filter=cfg.base_n_filter)
 
     def forward(self, x1, x2):
         # x1: (B, S, 1, P, P, P)
         # x2: (B, S, 1, P, P, P)
 
-        # The feature extractors require a channel of 3
-        if x1.size()[2] == 1:
-            x1 = x1.repeat(1, 1, 3, 1, 1, 1)
-            # x1: (B, S, 3, P, P, P)
-        if x2.size()[2] == 1:
-            x2 = x2.repeat(1, 1, 3, 1, 1, 1)
-            # x2: (B, S, 3, P, P, P)
-
         # Concat. TPs
         x = torch.cat([x1, x2], dim=1).to(self.cfg.device)
-        # x: (B, 2 * S, 3, P, P, P)
+        # x: (B, 2 * S, 1, P, P, P)
 
-        x, attention_weights, features = self.transformer(x)
+        x, attention_weights, context_out, context_features = self.transformer(x)
         # x: (B, 2 * S, H)
-        # attention_weights: [AH]
-        # features: [4]
-
-        clf_logits = self.clf(x[:, self.cfg.num_patches: , :])
-        # clf_logits: (B, S, 2)
-
-        """
-        print('X: ', x.shape)
-        for i in range(len(features)):
-            print('Feat L %d: ' % i, features[i].shape)
-        """
-
-        seg_logits = self.seg(x, features)
-        # seg_logits: (B, 2 * S, 32, 32, 32)
-
-        # TODO: The below line probably doesn't make sense. Find a way to do the separation more smoothly!
-        seg_logits = seg_logits[:, self.cfg.num_patches:, :, :, :]
-        # seg_logits: (B, S, 32, 32, 32)
-
-        return clf_logits, seg_logits
-
-
-# -------------------------------- ResNet3D Encoder Implementation --------------------------------
-class Conv3DSimple(nn.Conv3d):
-    def __init__(self, in_planes, out_planes, midplanes=None, stride=1, padding=1):
-        super(Conv3DSimple, self).__init__(in_channels=in_planes,
-                                           out_channels=out_planes,
-                                           kernel_size=(3, 3, 3),
-                                           stride=stride,
-                                           padding=padding,
-                                           bias=False)
-
-    @staticmethod
-    def get_downsample_stride(stride):
-        return stride, stride, stride
-
-
-class BasicBlock(nn.Module):
-    expansion = 1
-
-    def __init__(self, inplanes, planes, conv_builder, stride=1, downsample=None):
-        midplanes = (inplanes * planes * 3 * 3 * 3) // (inplanes * 3 * 3 + 3 * planes)
-
-        super(BasicBlock, self).__init__()
-        self.conv1 = nn.Sequential(
-            conv_builder(inplanes, planes, midplanes, stride),
-            nn.BatchNorm3d(planes),
-            nn.ReLU(inplace=True)
-        )
-        self.conv2 = nn.Sequential(
-            conv_builder(planes, planes, midplanes),
-            nn.BatchNorm3d(planes)
-        )
-        self.relu = nn.ReLU(inplace=True)
-        self.downsample = downsample
-        self.stride = stride
-
-    def forward(self, x):
-        residual = x
-
-        out = self.conv1(x)
-        out = self.conv2(out)
-        if self.downsample is not None:
-            residual = self.downsample(x)
-
-        out += residual
-        out = self.relu(out)
-
-        return out
-
-
-class Bottleneck(nn.Module):
-    expansion = 4
-
-    def __init__(self, inplanes, planes, conv_builder, stride=1, downsample=None):
-        super(Bottleneck, self).__init__()
-        midplanes = (inplanes * planes * 3 * 3 * 3) // (inplanes * 3 * 3 + 3 * planes)
-
-        # 1x1x1
-        self.conv1 = nn.Sequential(
-            nn.Conv3d(inplanes, planes, kernel_size=1, bias=False),
-            nn.BatchNorm3d(planes),
-            nn.ReLU(inplace=True)
-        )
-
-        # Second kernel
-        self.conv2 = nn.Sequential(
-            conv_builder(planes, planes, midplanes, stride),
-            nn.BatchNorm3d(planes),
-            nn.ReLU(inplace=True)
-        )
-
-        # 1x1x1
-        self.conv3 = nn.Sequential(
-            nn.Conv3d(planes, planes * self.expansion, kernel_size=1, bias=False),
-            nn.BatchNorm3d(planes * self.expansion)
-        )
-
-        self.relu = nn.ReLU(inplace=True)
-        self.downsample = downsample
-        self.stride = stride
-
-    def forward(self, x):
-        residual = x
-
-        out = self.conv1(x)
-        out = self.conv2(out)
-        out = self.conv3(out)
-
-        if self.downsample is not None:
-            residual = self.downsample(x)
-
-        out += residual
-        out = self.relu(out)
-
-        return out
-
-
-class BasicStem(nn.Module):
-    """The default conv-batchnorm-relu stem"""
-    def __init__(self):
-        super(BasicStem, self).__init__()
-        self.conv = nn.Conv3d(3, 32, kernel_size=(7, 7, 7), stride=(2, 2, 2), padding=(3, 3, 3), bias=False)
-        self.batch_norm = nn.BatchNorm3d(32)
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.batch_norm(x)
-        x = F.relu(x)
-        return x
-
-
-class VideoResNet(nn.Module):
-    def __init__(self, block, conv_makers, layers, num_classes=512, zero_init_residual=False):
-        """Generic ResNet video generator.
-
-        Args:
-            block (nn.Module): ResNet building block
-            conv_makers (list(functions)): generator function for each layer
-            layers (List[int]): number of blocks per layer
-            num_classes (int, optional): Dimension of the final FC layer. Defaults to 400.
-            zero_init_residual (bool, optional): Zero init bottleneck residual BN. Defaults to False.
-        """
-        super(VideoResNet, self).__init__()
-        self.inplanes = 32
-
-        self.stem = BasicStem()
-
-        self.layer1 = self._make_layer(block, conv_makers[0], 32, layers[0], stride=1)
-        self.layer2 = self._make_layer(block, conv_makers[1], 64, layers[1], stride=2)
-        self.layer3 = self._make_layer(block, conv_makers[2], 128, layers[2], stride=2)
-        self.layer4 = self._make_layer(block, conv_makers[3], 256, layers[3], stride=2)
-
-        self.avgpool = nn.AdaptiveAvgPool3d((1, 1, 1))
-        self.fc = nn.Linear(256 * block.expansion, num_classes)
-
-        # init weights
-        self._initialize_weights()
-
-        if zero_init_residual:
-            for m in self.modules():
-                if isinstance(m, Bottleneck):
-                    nn.init.constant_(m.bn3.weight, 0)
-
-    def forward(self, x):
-        # Collect features from different levels -> will be passed to UNet decoder
-        features = []
-
-        x = self.stem(x)
-
-        x = self.layer1(x)
-        features.append(x)
-
-        x = self.layer2(x)
-        features.append(x)
-
-        x = self.layer3(x)
-        features.append(x)
-
-        x = self.layer4(x)
-        features.append(x)
-
-        x = self.avgpool(x)
-
-        # Flatten the layer to fc
-        x = x.flatten(1)
-        x = self.fc(x)
-
-        return x, features
-
-    def _make_layer(self, block, conv_builder, planes, blocks, stride=1):
-        downsample = None
-
-        if stride != 1 or self.inplanes != planes * block.expansion:
-            ds_stride = conv_builder.get_downsample_stride(stride)
-            downsample = nn.Sequential(
-                nn.Conv3d(self.inplanes, planes * block.expansion, kernel_size=1, stride=ds_stride, bias=False),
-                nn.BatchNorm3d(planes * block.expansion)
-            )
-        layers = list()
-        layers.append(block(self.inplanes, planes, conv_builder, stride, downsample))
-
-        self.inplanes = planes * block.expansion
-        for i in range(1, blocks):
-            layers.append(block(self.inplanes, planes, conv_builder))
-
-        return nn.Sequential(*layers)
-
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv3d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out',
-                                        nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm3d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                nn.init.constant_(m.bias, 0)
-
-
-# -------------------------------- UNet3D Decoder Implementation --------------------------------
-class SegmentationHead(nn.Module):
-    def __init__(self, cfg):
-        super(SegmentationHead, self).__init__()
-        self.cfg = cfg
-
-        self.upsampler1 = nn.Upsample(scale_factor=(2, 2, 2), mode='nearest')
-        self.conv1 = nn.Conv3d(self.cfg.hidden_size + 256, 128, kernel_size=3, stride=1, padding=1, bias=False)
-        self.inorm1 = nn.InstanceNorm3d(128, momentum=0.9)
-
-        self.upsampler2 = nn.Upsample(scale_factor=(2, 2, 2), mode='nearest')
-        self.conv2 = nn.Conv3d(256, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        self.inorm2 = nn.InstanceNorm3d(64, momentum=0.9)
-
-        self.upsampler3 = nn.Upsample(scale_factor=(2, 2, 2), mode='nearest')
-        self.conv3 = nn.Conv3d(128, 32, kernel_size=3, stride=1, padding=1, bias=False)
-        self.inorm3 = nn.InstanceNorm3d(32, momentum=0.9)
-
-        self.upsampler4 = nn.Upsample(scale_factor=(2, 2, 2), mode='nearest')
-        self.conv4 = nn.Conv3d(64, 16, kernel_size=3, stride=1, padding=1, bias=False)
-        self.inorm4 = nn.InstanceNorm3d(64, momentum=0.9)
-
-        self.upsampler5 = nn.Upsample(scale_factor=(2, 2, 2), mode='nearest')
-        self.conv5 = nn.Conv3d(16, 1, kernel_size=3, stride=1, padding=1)
-
-    def forward(self, x, features):
-        # x: (B, 2 * S, H)
-        # feat0: (B, 2 * S, 32, 16, 16, 16)
-        # feat1: (B, 2 * S, 64, 8, 8, 8)
-        # feat2: (B, 2 * S, 128, 4, 4, 4)
-        # feat3: (B, 2 * S, 256, 2, 2, 2)
-
-        # ---- 1 ----
-        x = x.view(x.size()[0] * x.size()[1], x.size()[2], 1, 1, 1)
-        # x: (2 * B * S, H, 1, 1, 1)
-        x = self.upsampler1(x)
-        # x: (2 * B * S, H, 2, 2, 2)
-        x = x.view(-1, 2 * self.cfg.num_patches, *x.size()[1:])
-        # x: (B, 2 * S, H, 2, 2, 2)
-
-        x = torch.cat([x, features[-1]], dim=2)
-        # x: (B, 2 * S, H + 256, 2, 2, 2)
-
-        x = x.view(x.size()[0] * x.size()[1], *x.size()[2:])
-        # x: (2 * B * S, H + 256, 2, 2, 2)
-
-        x = self.conv1(x)
-        x = self.inorm1(x)
-        x = F.leaky_relu(x)
-        # x: (2 * B * S, 128, 2, 2, 2)
-
-        # ---- 2 ----
-        x = self.upsampler2(x)
-        # x: (2 * B * S, 128, 4, 4, 4)
-        x = x.view(-1, 2 * self.cfg.num_patches, *x.size()[1:])
-        # x: (B, 2 * S, 128, 4, 4, 4)
-
-        x = torch.cat([x, features[-2]], dim=2)
-        # x: (B, 2 * S, 256, 4, 4, 4)
-
-        x = x.view(x.size()[0] * x.size()[1], *x.size()[2:])
-        # x: (2 * B * S, 256, 4, 4, 4)
-
-        x = self.conv2(x)
-        x = self.inorm2(x)
-        x = F.leaky_relu(x)
-        # x: (2 * B * S, 64, 4, 4, 4)
-
-        # ---- 3 ----
-        x = self.upsampler3(x)
-        # x: (2 * B * S, 64, 8, 8, 8)
-        x = x.view(-1, 2 * self.cfg.num_patches, *x.size()[1:])
-        # x: (B, 2 * S, 64, 8, 8, 8)
-
-        x = torch.cat([x, features[-3]], dim=2)
-        # x: (B, 2 * S, 128, 8, 8, 8)
-
-        x = x.view(x.size()[0] * x.size()[1], *x.size()[2:])
-        # x: (2 * B * S, 128, 8, 8, 8)
-
-        x = self.conv3(x)
-        x = self.inorm3(x)
-        x = F.leaky_relu(x)
-        # x: (2 * B * S, 32, 8, 8, 8)
-
-        # ---- 4 ----
-        x = self.upsampler4(x)
-        # x: (2 * B * S, 32, 16, 16, 16)
-        x = x.view(-1, 2 * self.cfg.num_patches, *x.size()[1:])
-        # x: (B, 2 * S, 32, 16, 16, 16)
-
-        x = torch.cat([x, features[-4]], dim=2)
-        # x: (B, 2 * S, 64, 16, 16, 16)
-
-        x = x.view(x.size()[0] * x.size()[1], *x.size()[2:])
-        # x: (2 * B * S, 64, 16, 16, 16)
-
-        x = self.conv4(x)
-        x = self.inorm4(x)
-        x = F.leaky_relu(x)
-        # x: (2 * B * S, 64, 16, 16, 16)
-
-        # ---- 5 ----
-        x = self.upsampler5(x)
-        # x: (2 * B * S, 64, 32, 32, 32)
-
-        x = self.conv5(x)
-        # x: (2 * B * S, 1, 32, 32, 32)
-
-        x = x.view(-1, 2 * self.cfg.num_patches, *x.size()[1:])[:, :, 0, :, :]
-        # x: (B, 2 * S, 32, 32, 32)
-
-        return x
-
+        # context_out: (2 * B * S, 8 * F, P // 8, P // 8, P // 8)
+        # attention_weights: [AH] -> (B, B, 2 * S, 2 * S)
+        # context_features: [4]
+        #   0 -> (2 * B * S, F, P, P, P)
+        #   1 -> (2 * B * S, 2 * F, P / 2, P / 2, P / 2)
+        #   2 -> (2 * B * S, 4 * F, P / 4, P / 4, P / 4)
+        #   3 -> (2 * B * S, 8 * F, P / 8, P / 8, P / 8)
+
+        # Save hidden output of transformer later for the classification task
+        x_hidden = x
+
+        x = x.view(x.size(0), x.size(1), self.cfg.base_n_filter * 8, *((self.cfg.patch_size // 8, ) * 3))
+        # x: (B, 2 * S, 8 * F, P // 8, P // 8, P // 8)
+        # NOTE: This works when mlp_dim == unet_encoder_output_dim -> make sure this is the case!
+
+        x = seq2batch(x)
+        # x: (2 * B * S, 8 * F, P // 8, P // 8, P // 8)
+
+        # TODO: We can also only send the latter half to the decoder! Decide on what to do here!
+        seg_logits_x1x2 = self.unet_decoder(x + context_out, context_features)
+        # seg_logits_x1x2: (2 * B * S, P, P, P)
+        seg_logits_x1x2 = batch2seq(seg_logits_x1x2, num_patches=2 * self.cfg.num_patches)
+        # seg_logits_x1x2: (B, 2 * S, P, P, P)
+
+        seg_logits = seg_logits_x1x2[:, :self.cfg.num_patches if self.cfg.task == '1' else self.cfg.num_patches:, :, :, :]
+        # seg_logits: (B, S, P, P, P)
+
+        if self.cfg.aux_clf_task:
+            clf_logits = self.clf(x_hidden[:, :self.cfg.num_patches if self.cfg.task == '1' else self.cfg.num_patches:, :])
+            # clf_logits: (B, S, 2)
+
+            return clf_logits, seg_logits
+
+        return seg_logits
