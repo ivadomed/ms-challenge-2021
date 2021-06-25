@@ -1,5 +1,6 @@
+"""Implements datasets for MSSeg2021 Challenge."""
 import os
-import random
+import subprocess
 from tqdm import tqdm
 import random
 import pandas as pd
@@ -9,14 +10,414 @@ import nibabel as nib
 import torch
 from torch.utils.data import Dataset
 
-from ivadomed.transforms import CenterCrop, RandomAffine, NormalizeInstance
+from ivadomed.transforms import Resample, CenterCrop, RandomAffine, NormalizeInstance, ElasticTransform
 
 
+# ---------------------------- Helpers Implementation -----------------------------
+def volume2subvolumes(volume, subvolume_size, stride_size):
+    """Converts 3D volumes into 3D subvolumes; works with PyTorch tensors."""
+    subvolumes = []
+    assert volume.ndim == 3
+
+    for x in range(0, (volume.shape[0] - subvolume_size[0]) + 1, stride_size[0]):
+        for y in range(0, (volume.shape[1] - subvolume_size[1]) + 1, stride_size[1]):
+            for z in range(0, (volume.shape[2] - subvolume_size[2]) + 1, stride_size[2]):
+                subvolume = volume[x: x + subvolume_size[0],
+                                   y: y + subvolume_size[1],
+                                   z: z + subvolume_size[2]]
+                subvolumes.append(subvolume)
+
+    return subvolumes
+
+
+def subvolumes2volume(subvolumes, volume_size):
+    """Converts list of 3D subvolumes into 3D volumes; works with NumPy arrays."""
+    assert len(volume_size) == 3
+    subvolume_size = subvolumes[0].shape
+    volume = np.zeros(volume_size)
+
+    num_subvolumes_per_dim = [volume_size[i] // subvolume_size[i] for i in range(3)]
+
+    for i, x in enumerate(range(0, (volume_size[0] - subvolume_size[0]) + 1, subvolume_size[0])):
+        for j, y in enumerate(range(0, (volume_size[1] - subvolume_size[1]) + 1, subvolume_size[1])):
+            for k, z in enumerate(range(0, (volume_size[2] - subvolume_size[2]) + 1, subvolume_size[2])):
+                # Get the subvolume index for the corresponding spatial location
+                subvolume_index = i * np.prod(num_subvolumes_per_dim[1:]) + j * num_subvolumes_per_dim[2] + k
+                # Fill in the volume with the corresponding subvolume
+                volume[x: x + subvolume_size[0],
+                       y: y + subvolume_size[1],
+                       z: z + subvolume_size[2]] = subvolumes[subvolume_index]
+
+    return volume
+
+
+def subvolume2patches(subvolume, patch_size):
+    """Extracts 3D patches from 3D subvolumes; works with PyTorch tensors."""
+    patches = []
+    assert subvolume.ndim == 3
+
+    for x in range(0, (subvolume.shape[0] - patch_size[0]) + 1, patch_size[0]):
+        for y in range(0, (subvolume.shape[1] - patch_size[1]) + 1, patch_size[1]):
+            for z in range(0, (subvolume.shape[2] - patch_size[2]) + 1, patch_size[2]):
+                patch = subvolume[x: x + patch_size[0],
+                                  y: y + patch_size[1],
+                                  z: z + patch_size[2]]
+
+                patches.append(patch)
+
+    num_patches = len(patches)
+    patches = np.array(patches)
+    assert patches.shape == (num_patches, *patch_size)
+
+    return patches
+
+
+# ---------------------------- Datasets Implementation -----------------------------
 class MSSeg2Dataset(Dataset):
-    """Custom PyTorch dataset for the MSSeg2 Challenge 2021. Works only with 3D subvolumes."""
-    def __init__(self, root, center_crop_size=(512, 512, 512), subvolume_size=(128, 128, 128),
-                 stride_size=(64, 64, 64), patch_size=(32, 32, 32),
-                 fraction_data=1.0, gt_type='consensus', use_patches=True, seed=42):
+    """
+    Custom PyTorch dataset for the MSSeg2 Challenge 2021. Works only with 3D subvolumes. Implements
+    training, validation, and test phases. Training and validation is utilized via the canonic
+    __get_item__() function and by carefully setting the `train` parameter before
+    accessing an item (e.g. via iterating over the dataloader in modeling/train.py). Test phase
+    is implemented with the `test` method.
+
+    :param (float) fraction_data: Fraction of subjects to use for the entire dataset. Helps with debugging.
+    :param (float) fraction_hold_out: Fraction of subjects to hold-out for the test phase. We want
+           to hold-out entire patients, as opposed to subvolumes, to have a more representative
+           test with the ANIMA script `animaSegPerfAnalyzer`.
+    :param (tuple) center_crop_size: The 3D center-crop size for the volumes. For now, we can
+           leave this at it's default value (320, 384, 512).
+    :param (tuple) subvolume_size: The 3D subvolume size to be used in training & validation.
+    :param (tuple) stride_size: The 3D stride size to be used in training & validation.
+    :param (tuple) patch_size: The 3D patch size to be used in training & validation. (TransUNet3D-specific)
+    :param (str) gt_type: The GT to use as the target masks. Leaving it at it's default 'consensus'
+           seems like the best option for now.
+    :param (bool) use_patches: Set to True for TransUNet3D and to False for other models.
+    :param (str) results_dir: The directory to where the save the results from test phase.
+    :param (bool) visualize_test_preds: Set to True to save predictions as NIfTI files during test phase.
+    :param (int) seed: Seed for reproducibility (e.g. we want the same train-val split with same seed)
+    """
+    def __init__(self, root, fraction_data=1.0, fraction_hold_out=0.2,
+                 center_crop_size=(320, 384, 512), subvolume_size=(128, 128, 128),
+                 stride_size=(64, 64, 64), patch_size=(32, 32, 32), gt_type='consensus',
+                 use_patches=True, results_dir='results', visualize_test_preds=False, seed=42):
+        super(MSSeg2Dataset).__init__()
+
+        # Set / create the results path for the test phase
+        if not os.path.exists(results_dir):
+            os.makedirs(results_dir)
+        else:
+            print('WARNING: results_dir=%s already exists! Files might be overwritten...' % results_dir)
+        self.results_dir = results_dir
+        self.visualize_test_preds = visualize_test_preds
+
+        # Get the ANIMA binaries path
+        cmd = r'''grep "^anima = " ~/.anima/config.txt | sed "s/.* = //"'''
+        self.anima_binaries_path = subprocess.check_output(cmd, shell=True).decode('utf-8').strip('\n')
+        print('ANIMA Binaries Path: ', self.anima_binaries_path)
+
+        # Quick argument checks
+        if not os.path.exists(root):
+            raise ValueError('Specified path=%s for the challenge data can NOT be found!' % root)
+
+        if len(center_crop_size) != 3:
+            raise ValueError('The `MSChallenge3D()` expects a 3D center crop size (e.g. 512x512x512)!')
+        if len(subvolume_size) != 3:
+            raise ValueError('The `MSChallenge3D()` expects a 3D subvolume size (e.g. 128x128x128)!')
+        if len(stride_size) != 3:
+            raise ValueError('The `MSChallenge3D()` expects a 3D stride size (e.g. 64x64x64)!')
+        if len(patch_size) != 3:
+            raise ValueError('The `MSChallenge3D()` expects a 3D patch size (e.g. 32x32x32)!')
+
+        if any([center_crop_size[i] < subvolume_size[i] for i in range(3)]):
+            raise ValueError('The center crop size must be >= subvolume size in all dimensions!')
+        if any([(center_crop_size[i] - subvolume_size[i]) % stride_size[i] != 0 for i in range(3)]):
+            raise ValueError('center_crop_size - subvolume_size % stride size must be 0 for all dimensions!')
+        if any([subvolume_size[i] < patch_size[i] for i in range(3)]):
+            raise ValueError('The subvolume size must be >= patch size in all dimensions!')
+
+        if not 0.0 < fraction_data <= 1.0:
+            raise ValueError('`fraction_data` needs to be between 0.0 and 1.0!')
+        if not 0.0 < fraction_hold_out <= 1.0:
+            raise ValueError('`fraction_hold_out` needs to be between 0.0 and 1.0!')
+
+        if gt_type not in ['consensus', 'expert1', 'expert2', 'expert3', 'expert4', 'random']:
+            raise ValueError('gt_type=%s not recognized!' % gt_type)
+
+        self.root = root
+        self.center_crop_size = center_crop_size
+        self.subvolume_size = subvolume_size
+        self.stride_size = stride_size
+        self.patch_size = patch_size
+        self.use_patches = use_patches
+        self.gt_type = gt_type
+        self.train = False
+
+        # Get all subjects
+        subjects_df = pd.read_csv(os.path.join(root, 'participants.tsv'), sep='\t')
+        subjects = subjects_df['participant_id'].values.tolist()
+
+        # Only use subset of the dataset if applicable (used for debugging)
+        if fraction_data != 1.0:
+            subjects = subjects[:int(len(subjects) * fraction_data)]
+
+        # Hold-out a fraction of subjects for test phase
+        random.seed(seed)
+        random.shuffle(subjects)
+        self.subjects_hold_out = subjects[:int(len(subjects) * fraction_hold_out)]
+        print('Hold-out Subjects: ', self.subjects_hold_out)
+
+        # The rest of the subjects will be used for the train and validation phases
+        subjects = subjects[int(len(subjects) * fraction_hold_out):]
+
+        # Iterate over kept subjects (i.e. after hold-out) and extract subvolumes
+        self.subvolumes, self.positive_indices = [], []
+        num_negatives, num_positives = 0, 0
+
+        for subject_no, subject in enumerate(tqdm(subjects, desc='Loading Volumes -> Preparing Subvolumes')):
+            # Read-in input volumes
+            ses01 = nib.load(os.path.join(root, subject, 'anat', '%s_FLAIR.nii.gz' % subject))
+            ses02 = nib.load(os.path.join(root, subject, 'anat', '%s_T1w.nii.gz' % subject))
+
+            # Read-in GT volumes (using the consensus GT for now)
+            gtc = nib.load(os.path.join(root, 'derivatives', 'labels', subject, 'anat', '%s_FLAIR_seg-lesion.nii.gz' % subject))
+
+            # Check if image sizes and resolutions match
+            assert ses01.shape == ses02.shape == gtc.shape
+            assert ses01.header['pixdim'].tolist() == ses02.header['pixdim'].tolist() == gtc.header['pixdim'].tolist()
+            assert ses01.header['pixdim'].tolist()[1:4] == [0.5, 0.5, 0.5]
+            # NOTE: We know that the above voxel dimensions will hold thanks to preprocessing step
+
+            # Convert to NumPy
+            ses01, ses02, gtc = ses01.get_fdata(), ses02.get_fdata(), gtc.get_fdata()
+
+            # Apply center-cropping
+            center_crop = CenterCrop(size=center_crop_size)
+            ses01 = center_crop(sample=ses01, metadata={'crop_params': {}})[0]
+            ses02 = center_crop(sample=ses02, metadata={'crop_params': {}})[0]
+            gtc = center_crop(sample=gtc, metadata={'crop_params': {}})[0]
+
+            # Get subvolumes from volumes and update the list
+            ses01_subvolumes = volume2subvolumes(volume=ses01, subvolume_size=self.subvolume_size, stride_size=self.stride_size)
+            ses02_subvolumes = volume2subvolumes(volume=ses02, subvolume_size=self.subvolume_size, stride_size=self.stride_size)
+            gtc_subvolumes = volume2subvolumes(volume=gtc, subvolume_size=self.subvolume_size, stride_size=self.stride_size)
+
+            assert len(ses01_subvolumes) == len(ses02_subvolumes) == len(gtc_subvolumes)
+
+            for i in range(len(ses01_subvolumes)):
+                subvolumes_ = {
+                    'ses01': ses01_subvolumes[i],
+                    'ses02': ses02_subvolumes[i],
+                    'gtc': gtc_subvolumes[i],
+                }
+
+                self.subvolumes.append(subvolumes_)
+
+                # Measure positiveness based on the consensus GT
+                if np.any(gtc_subvolumes[i]):
+                    self.positive_indices.append(int(subject_no * len(ses01_subvolumes) + i))
+                    num_positives += 1
+                else:
+                    num_negatives += 1
+
+        self.inbalance_factor = num_negatives // num_positives
+        print('Factor of overall inbalance is %d!' % self.inbalance_factor)
+
+        print('Extracted a total of %d subvolumes!' % len(self.subvolumes))
+
+    def __getitem__(self, index):
+        """Returns ses01, ses02, and GT subvolumes for the train and validation phases"""
+        # Retrieve subvolumes belonging to this index for train and validation phases
+        subvolumes = self.subvolumes[index]
+        ses01_subvolume, ses02_subvolume, gt_subvolume = subvolumes['ses01'], subvolumes['ses02'], subvolumes['gtc']
+
+        # Training augmentations
+        if self.train:
+            # (1.a) Apply random affine: rotation, translation, and scaling with P = 0.6
+            if random.random() < 0.6:
+                # NOTE: `metadata` ensures that the same affine is applied to all three subvolumes
+                # NOTE: We don't want to mess the scale up too much as we use 0.5 x 0.5 x 0.5 mm^3
+                random_affine = RandomAffine(degrees=45, translate=[0.25, 0.25, 0.25], scale=[0.025, 0.025, 0.025])
+                ses01_subvolume, metadata = random_affine(sample=ses01_subvolume, metadata={})
+                ses02_subvolume, _ = random_affine(sample=ses02_subvolume, metadata=metadata)
+                gt_subvolume, _ = random_affine(sample=gt_subvolume, metadata=metadata)
+            # (1.b) Apply random elastic transform with P = 0.4
+            else:
+                # NOTE: `metadata` ensures that the same affine is applied to all three subvolumes
+                random_elastic_transform = ElasticTransform(alpha_range=(25.0, 35.0), sigma_range=(3.5, 5.5), p=1.0)
+                ses01_subvolume, metadata = random_elastic_transform(sample=ses01_subvolume, metadata={})
+                ses02_subvolume, _ = random_elastic_transform(sample=ses02_subvolume, metadata=metadata)
+                gt_subvolume, _ = random_elastic_transform(sample=gt_subvolume, metadata=metadata)
+
+        # (2) Normalize images to zero mean and unit variance
+        if ses01_subvolume.std() < 1e-5 or ses02_subvolume.std() < 1e-5:
+            # If subvolumes uniform: do mean-subtraction
+            ses01_subvolume = ses01_subvolume - ses01_subvolume.mean()
+            ses02_subvolume = ses02_subvolume - ses02_subvolume.mean()
+        else:
+            normalize_instance = NormalizeInstance()
+            ses01_subvolume, _ = normalize_instance(sample=ses01_subvolume, metadata={})
+            ses02_subvolume, _ = normalize_instance(sample=ses02_subvolume, metadata={})
+
+        # TODO: Explore torhcio and other data-augmentation strategies (@naga-karthik)
+
+        # Extract & return patches from subvolumes (if applicable -> needed for transformer model)
+        if self.use_patches and self.subvolume_size != self.patch_size:
+            ses01_patches = subvolume2patches(subvolume=ses01_subvolume, patch_size=self.patch_size)
+            ses02_patches = subvolume2patches(subvolume=ses02_subvolume, patch_size=self.patch_size)
+            gt_patches = subvolume2patches(subvolume=gt_subvolume, patch_size=self.patch_size)
+
+            # Compute classification GTs
+            clf_gt_patches = [int(np.any(gt_patch)) for gt_patch in gt_patches]
+
+            # Conversion to PyTorch tensors
+            x1 = torch.tensor(ses01_patches, dtype=torch.float)
+            x2 = torch.tensor(ses02_patches, dtype=torch.float)
+            seg_y = torch.tensor(gt_patches, dtype=torch.float)
+            clf_y = torch.tensor(clf_gt_patches, dtype=torch.long)
+            # NOTE: The times two is added because of x1 and x2 logic in our current model
+
+            return index, x1, x2, seg_y, clf_y
+
+        # Return subvolumes, i.e. don't extract patches
+        else:
+            # Conversion to PyTorch tensors
+            x1 = torch.tensor(ses01_subvolume, dtype=torch.float)
+            x2 = torch.tensor(ses02_subvolume, dtype=torch.float)
+            seg_y = torch.tensor(gt_subvolume, dtype=torch.float)
+            clf_y = torch.tensor(int(np.any(gt_subvolume)), dtype=torch.long)
+
+            return index, x1, x2, seg_y, clf_y
+
+    def __len__(self):
+        return len(self.subvolumes)
+
+    def test(self, model, device):
+        """Implements the test phase via animaSegPerfAnalyzer"""
+        assert model is not None
+
+        # Compute num. subvolumes per dim and total for a quick check later on
+        num_subvolumes_per_dim = [self.center_crop_size[i] // self.subvolume_size[i] for i in range(3)]
+        num_subvolumes = np.prod(num_subvolumes_per_dim)
+
+        for subject_no, subject in enumerate(tqdm(self.subjects_hold_out, desc='Testing Phase')):
+            # Read-in input test volumes
+            ses01 = nib.load(os.path.join(self.root, subject, 'anat', '%s_FLAIR.nii.gz' % subject))
+            ses02 = nib.load(os.path.join(self.root, subject, 'anat', '%s_T1w.nii.gz' % subject))
+
+            # Read-in GT volumes (using the consensus GT for now)
+            gtc = nib.load(os.path.join(self.root, 'derivatives', 'labels', subject, 'anat', '%s_FLAIR_seg-lesion.nii.gz' % subject))
+
+            # Check if image sizes and resolutions match
+            assert ses01.shape == ses02.shape == gtc.shape
+            assert ses01.header['pixdim'].tolist() == ses02.header['pixdim'].tolist() == gtc.header['pixdim'].tolist()
+            assert ses01.header['pixdim'].tolist()[1:4] == [0.5, 0.5, 0.5]
+            # NOTE: We know that the above voxel dimensions will hold thanks to preprocessing step
+
+            # Convert to NumPy
+            ses01, ses02, gtc = ses01.get_fdata(), ses02.get_fdata(), gtc.get_fdata()
+
+            # Apply center-cropping
+            center_crop = CenterCrop(size=self.center_crop_size)
+            ses01 = center_crop(sample=ses01, metadata={'crop_params': {}})[0]
+            ses02 = center_crop(sample=ses02, metadata={'crop_params': {}})[0]
+            gtc = center_crop(sample=gtc, metadata={'crop_params': {}})[0]
+
+            # Get subvolumes from volumes
+            # NOTE: We use subvolume size for the stride size to get non-overlapping test subvolumes
+            ses01_subvolumes = volume2subvolumes(volume=ses01, subvolume_size=self.subvolume_size, stride_size=self.subvolume_size)
+            ses02_subvolumes = volume2subvolumes(volume=ses02, subvolume_size=self.subvolume_size, stride_size=self.subvolume_size)
+            gtc_subvolumes = volume2subvolumes(volume=gtc, subvolume_size=self.subvolume_size, stride_size=self.subvolume_size)
+            assert len(ses01_subvolumes) == len(ses02_subvolumes) == len(gtc_subvolumes) == num_subvolumes
+
+            # Collect individual subvolume predictions for full volume segmentation (i.e. full scan for one subject)
+            pred_subvolumes = []
+            for i in range(len(ses01_subvolumes)):
+                ses01_subvolume, ses02_subvolume, gtc_subvolume = ses01_subvolumes[i], ses02_subvolumes[i], gtc_subvolumes[i]
+
+                # (2) Normalize images to zero mean and unit variance
+                if ses01_subvolume.std() < 1e-5 or ses02_subvolume.std() < 1e-5:
+                    # If subvolumes uniform: do mean-subtraction
+                    ses01_subvolume = ses01_subvolume - ses01_subvolume.mean()
+                    ses02_subvolume = ses02_subvolume - ses02_subvolume.mean()
+                else:
+                    normalize_instance = NormalizeInstance()
+                    ses01_subvolume, _ = normalize_instance(sample=ses01_subvolume, metadata={})
+                    ses02_subvolume, _ = normalize_instance(sample=ses02_subvolume, metadata={})
+
+                # TODO: Configure patches for TransUNet3D
+
+                # NOTE: Unsqueeze tensors twice for the batch_size=1 and num_channels=1 effect
+                x1 = torch.tensor(ses01_subvolume, dtype=torch.float).view(1, 1, *ses01_subvolume.shape).to(device)
+                x2 = torch.tensor(ses02_subvolume, dtype=torch.float).view(1, 1, *ses02_subvolume.shape).to(device)
+
+                seg_y_hat = model(x1, x2).detach().cpu().numpy()
+
+                if self.visualize_test_preds:
+                    if np.any(gtc_subvolume):
+                        seg_y_hat_nib = nib.Nifti1Image(seg_y_hat, affine=np.eye(4))
+                        nib.save(img=seg_y_hat_nib, filename=os.path.join(self.results_dir, '%s_%d_pred.nii.gz' % (subject, i)))
+                        gtc_subvolume_nib = nib.Nifti1Image(gtc_subvolume, affine=np.eye(4))
+                        nib.save(img=gtc_subvolume_nib, filename=os.path.join(self.results_dir, '%s_%d_gt.nii.gz' % (subject, i)))
+
+                pred_subvolumes.append(seg_y_hat)
+
+            # Convert the list of subvolume predictions to a single volume segmentation / prediction
+            pred = subvolumes2volume(subvolumes=pred_subvolumes, volume_size=self.center_crop_size)
+            assert pred.shape == gtc.shape
+
+            # Convert predictions and GT to binary to be compatible with ANIMA metrics
+            pred = np.array(pred > 0.5, dtype=float)
+            gtc = np.array(gtc > 0.5, dtype=float)
+
+            # TODO: Also here we will need to run evaluation on the original GT in the actual
+            #       testing phase of the challenge, which will require us to
+            #       (i) downsample the pred. to the original resolution of the GT,
+            #       (ii) remove center-cropping in this script,
+            #       (iii) remove ROI-cropping in the preprocessing.
+
+            # Save the prediction and the center-cropped GT as new NIfTI files
+            # NOTE: We are deleting & overwriting the NIfTI files at each iteration
+            pred_nib = nib.Nifti1Image(pred, affine=np.eye(4))
+            gtc_nib = nib.Nifti1Image(gtc, affine=np.eye(4))
+            nib.save(img=pred_nib, filename='./pred.nii.gz')
+            nib.save(img=gtc_nib, filename='./gt.nii.gz')
+
+            # Run ANIMA segmentation performance metrics on the predictions
+            # NOTE: We use certain additional arguments below with the following purposes:
+            #       -d -> surface distance eval, -l -> detection of lesions eval
+            #       -a -> intra-lesion eval, -s -> segmentation eval, -S -> log to screen
+            seg_perf_analyzer_cmd = '%s -i ./pred.nii.gz -r ./gt.nii.gz -o %s -d -l -a -s -S'
+            os.system(seg_perf_analyzer_cmd % (os.path.join(self.anima_binaries_path, 'animaSegPerfAnalyzer'), os.path.join(self.results_dir, subject)))
+
+            # Delete temporary NIfTI files
+            os.remove('./pred.nii.gz')
+            os.remove('./gt.nii.gz')
+
+
+class MSSeg1Dataset(Dataset):
+    """
+    Custom PyTorch dataset for the MSSeg1 Challenge 2016. Works only with 3D subvolumes. Implements
+    training and validation phases. Training and validation is utilized via the canonic
+    __get_item__() function and by carefully setting the `train` parameter before
+    accessing an item (e.g. via iterating over the dataloader in modeling/train.py).
+
+    # TODO: Lot's of common code with MSSeg2Dataset, make it inherit from there if time allows!
+
+    :param (float) fraction_data: Fraction of subjects to use for the entire dataset. Helps with debugging.
+    :param (tuple) resolution: The common 3D resolution to resample all subjects / volumes.
+    :param (tuple) center_crop_size: The 3D center-crop size for the volumes. For now, we can
+           leave this at it's default value (320, 384, 512).
+    :param (tuple) subvolume_size: The 3D subvolume size to be used in training & validation.
+    :param (tuple) stride_size: The 3D stride size to be used in training & validation.
+    :param (tuple) patch_size: The 3D patch size to be used in training & validation. (TransUNet3D-specific)
+    :param (str) gt_type: The GT to use as the target masks. Leaving it at it's default 'staple'
+           seems like the best option for now.
+    :param (bool) use_patches: Set to True for TransUNet3D and to False for other models.
+    """
+    def __init__(self, root, resolution=(0.5, 0.5, 0.5), center_crop_size=(512, 512, 512),
+                 subvolume_size=(128, 128, 128), stride_size=(64, 64, 64), patch_size=(32, 32, 32),
+                 fraction_data=1.0, gt_type='staple', use_patches=True):
         super(MSSeg2Dataset).__init__()
 
         # Quick argument checks
@@ -42,11 +443,15 @@ class MSSeg2Dataset(Dataset):
         if not 0.0 < fraction_data <= 1.0:
             raise ValueError('`fraction_data` needs to be between 0.0 and 1.0!')
 
+        if gt_type not in ['expert1', 'expert2', 'expert3', 'expert4', 'expert5', 'expert6', 'expert7', 'random', 'staple', 'average']:
+            raise ValueError('gt_type=%s not recognized!' % gt_type)
+
         self.center_crop_size = center_crop_size
         self.subvolume_size = subvolume_size
         self.stride_size = stride_size
         self.patch_size = patch_size
         self.use_patches = use_patches
+        self.gt_type = gt_type
         self.train = False
 
         # Get all subjects
@@ -58,147 +463,124 @@ class MSSeg2Dataset(Dataset):
             subjects = subjects[:int(len(subjects) * fraction_data)]
 
         # Iterate over all subjects and extract subvolumes
-        self.subvolumes = []
+        self.subvolumes, self.positive_indices = [], []
         num_negatives, num_positives = 0, 0
-        for subject in tqdm(subjects, desc='Reading-in volumes'):
+
+        for subject_no, subject in enumerate(tqdm(subjects, desc='Loading Volumes -> Preparing Subvolumes')):
             # Read-in input volumes
             ses01 = nib.load(os.path.join(root, subject, 'anat', '%s_FLAIR.nii.gz' % subject))
-            ses02 = nib.load(os.path.join(root, subject, 'anat', '%s_T1w.nii.gz' % subject))
 
             # Read-in GT volumes
-            if gt_type == 'consensus':
-                gt = nib.load(os.path.join(root, 'derivatives', 'labels', subject, 'anat', '%s_FLAIR_seg-lesion.nii.gz' % subject))
+            gt = None
+            if gt_type == 'staple':
+                gt = nib.load(os.path.join(root, 'derivatives', 'labels', subject, 'anat', '%s_FLAIR_seg-lesion0.nii.gz' % subject))
+            elif gt_type == 'average':
+                gt = nib.load(os.path.join(root, 'derivatives', 'labels', subject, 'anat', '%s_FLAIR_seg-average-lesion.nii.gz' % subject))
             else:
-                expert_no = int(gt_type[-1])
-                gt = nib.load(os.path.join(root, 'derivatives', 'labels', subject, 'anat', '%s_FLAIR_acq-expert%d_lesion-manual.nii.gz' % (subject, expert_no)))
+                raise NotImplementedError('gt_type=%s is not yet implemented!')
 
             # Check if image sizes and resolutions match
-            assert ses01.shape == ses02.shape == gt.shape
-            assert ses01.header['pixdim'].tolist() == ses02.header['pixdim'].tolist() == gt.header['pixdim'].tolist()
+            assert ses01.shape == gt.shape
+            # assert ses01.header['pixdim'].tolist() == gt.header['pixdim'].tolist()  -> apparently this is not the case!
+            ses01_original_resolution = ses01.header['pixdim'].tolist()[1:4]
+            gt_original_resolution = gt.header['pixdim'].tolist()[1:4]
 
             # Convert to NumPy
-            ses01, ses02, gt = ses01.get_fdata(), ses02.get_fdata(), gt.get_fdata()
+            ses01 = ses01.get_fdata()
+            gt = gt.get_fdata()
+
+            # Apply resampling
+            # NOTE: This is not required for MSSeg2 as we rely on the preprocessing step for that
+            resample = Resample(hspace=resolution[0], wspace=resolution[1], dspace=resolution[2])
+            ses01 = resample(sample=ses01, metadata={'zooms': ses01_original_resolution, 'data_type': 'im'})[0]
+            gt = resample(sample=gt, metadata={'zooms': gt_original_resolution, 'data_type': 'gt'})[0]
 
             # Apply center-cropping
             center_crop = CenterCrop(size=center_crop_size)
             ses01 = center_crop(sample=ses01, metadata={'crop_params': {}})[0]
-            ses02 = center_crop(sample=ses02, metadata={'crop_params': {}})[0]
             gt = center_crop(sample=gt, metadata={'crop_params': {}})[0]
 
             # Get subvolumes from volumes and update the list
-            ses01_subvolumes = self.volume2subvolumes(volume=ses01)
-            ses02_subvolumes = self.volume2subvolumes(volume=ses02)
-            gt_subvolumes = self.volume2subvolumes(volume=gt)
-            assert len(ses01_subvolumes) == len(ses02_subvolumes) == len(gt_subvolumes)
+            ses01_subvolumes = volume2subvolumes(volume=ses01, subvolume_size=self.subvolume_size, stride_size=self.stride_size)
+            gt_subvolumes = volume2subvolumes(volume=gt, subvolume_size=self.subvolume_size, stride_size=self.stride_size)
+
+            assert len(ses01_subvolumes) == len(gt_subvolumes)
 
             for i in range(len(ses01_subvolumes)):
                 subvolumes_ = {
                     'ses01': ses01_subvolumes[i],
-                    'ses02': ses02_subvolumes[i],
-                    'gt': gt_subvolumes[i]
+                    'gt': gt_subvolumes[i],
                 }
+
                 self.subvolumes.append(subvolumes_)
 
+                # Measure positiveness based on the GT
                 if np.any(gt_subvolumes[i]):
+                    self.positive_indices.append(int(subject_no * len(ses01_subvolumes) + i))
                     num_positives += 1
                 else:
                     num_negatives += 1
 
-        print('Factor of inbalance is %d!' % (num_negatives // num_positives))
+        self.inbalance_factor = num_negatives // num_positives
+        print('Factor of overall inbalance is %d!' % self.inbalance_factor)
 
-        # Shuffle subvolumes just in case
-        random.seed(seed)
-        random.shuffle(self.subvolumes)
         print('Extracted a total of %d subvolumes!' % len(self.subvolumes))
-
-    def volume2subvolumes(self, volume):
-        """Converts 3D volumes into 3D subvolumes"""
-        subvolumes = []
-        assert volume.ndim == 3
-
-        for x in range(0, (volume.shape[0] - self.subvolume_size[0]) + 1, self.stride_size[0]):
-            for y in range(0, (volume.shape[1] - self.subvolume_size[1]) + 1, self.stride_size[1]):
-                for z in range(0, (volume.shape[2] - self.subvolume_size[2]) + 1, self.stride_size[2]):
-                    subvolume = volume[x: x + self.subvolume_size[0],
-                                       y: y + self.subvolume_size[1],
-                                       z: z + self.subvolume_size[2]]
-                    subvolumes.append(subvolume)
-
-        return subvolumes
-
-    def subvolume2patches(self, subvolume):
-        """Extracts 3D patches from 3D subvolumes; works with PyTorch tensors."""
-        patches = []
-        assert subvolume.ndim == 3
-
-        for x in range(0, (subvolume.shape[0] - self.patch_size[0]) + 1, self.patch_size[0]):
-            for y in range(0, (subvolume.shape[1] - self.patch_size[1]) + 1, self.patch_size[1]):
-                for z in range(0, (subvolume.shape[2] - self.patch_size[2]) + 1, self.patch_size[2]):
-                    patch = subvolume[x: x + self.patch_size[0],
-                                      y: y + self.patch_size[1],
-                                      z: z + self.patch_size[2]]
-                    patches.append(patch)
-
-        num_patches = len(patches)
-        patches = np.array(patches)
-        assert patches.shape == (num_patches, *self.patch_size)
-
-        return patches
 
     def __getitem__(self, index):
         # Retrieve subvolumes belonging to this index
         subvolumes = self.subvolumes[index]
-        ses01_subvolumes, ses02_subvolumes, gt_subvolumes = subvolumes['ses01'], subvolumes['ses02'], subvolumes['gt']
+        ses01_subvolume, gt_subvolume = subvolumes['ses01'], subvolumes['gt']
 
-        # Training augmentations
         if self.train:
-            # Apply random affine: rotation, translation, and scaling
-            # NOTE: Use of `metadata` ensures that the same affine is applied to all three subvolumes
-            random_affine = RandomAffine(degrees=20, translate=[0.1, 0.1, 0.1], scale=[0.1, 0.1, 0.1])
-            ses01_subvolumes, metadata = random_affine(sample=ses01_subvolumes, metadata={})
-            ses02_subvolumes, _ = random_affine(sample=ses02_subvolumes, metadata=metadata)
-            gt_subvolumes, _ = random_affine(sample=gt_subvolumes, metadata=metadata)
-
-        # If subvolumes uniform: train-time -> skip to random sample, val-time -> mean-subtraction
-        # NOTE: This will also help with discarding empty inputs!
-        if ses01_subvolumes.std() < 1e-5 or ses02_subvolumes.std() < 1e-5:
-            if self.train:
-                return self.__getitem__(random.randint(0, self.__len__() - 1))
+            # (1.a) Apply random affine: rotation, translation, and scaling with P = 0.6
+            if random.random() < 0.6:
+                # NOTE: `metadata` ensures that the same affine is applied to all three subvolumes
+                random_affine = RandomAffine(degrees=45, translate=[0.25, 0.25, 0.25], scale=[0.025, 0.025, 0.025])
+                ses01_subvolume, metadata = random_affine(sample=ses01_subvolume, metadata={})
+                gt_subvolume, _ = random_affine(sample=gt_subvolume, metadata=metadata)
+            # (1.b) Apply random elastic transform with P = 0.4
             else:
-                ses01_subvolumes = ses01_subvolumes - ses01_subvolumes.mean()
-                ses02_subvolumes = ses02_subvolumes - ses02_subvolumes.mean()
-        # Normalize images to zero mean and unit variance
+                # NOTE: `metadata` ensures that the same affine is applied to all three subvolumes
+                random_elastic_transform = ElasticTransform(alpha_range=(25.0, 35.0), sigma_range=(3.5, 5.5), p=1.0)
+                ses01_subvolume, metadata = random_elastic_transform(sample=ses01_subvolume, metadata={})
+                gt_subvolume, _ = random_elastic_transform(sample=gt_subvolume, metadata=metadata)
+
+        # (2) Normalize images to zero mean and unit variance
+        if ses01_subvolume.std() < 1e-5:
+            # If subvolume uniform: do mean-subtraction
+            # NOTE: This will also help with discarding empty inputs!
+            ses01_subvolume = ses01_subvolume - ses01_subvolume.mean()
         else:
             normalize_instance = NormalizeInstance()
-            ses01_subvolumes, _ = normalize_instance(sample=ses01_subvolumes, metadata={})
-            ses02_subvolumes, _ = normalize_instance(sample=ses02_subvolumes, metadata={})
+            ses01_subvolume, _ = normalize_instance(sample=ses01_subvolume, metadata={})
 
-        # Extract & return patches from subvolumes (if applicable -> needed for transformer model)
+        # Extract & return patches from subvolume (if applicable -> needed for transformer model)
+        # NOTE: We are still returning x2 (as zeros) to be model compatible!
         if self.use_patches and self.subvolume_size != self.patch_size:
-            ses01_patches = self.subvolume2patches(subvolume=ses01_subvolumes)
-            ses02_patches = self.subvolume2patches(subvolume=ses02_subvolumes)
-            gt_patches = self.subvolume2patches(subvolume=gt_subvolumes)
+            ses01_patches = subvolume2patches(subvolume=ses01_subvolume, patch_size=self.patch_size)
+            gt_patches = subvolume2patches(subvolume=gt_subvolume, patch_size=self.patch_size)
 
             # Compute classification GTs
             clf_gt_patches = [int(np.any(gt_patch)) for gt_patch in gt_patches]
 
             # Conversion to PyTorch tensors
             x1 = torch.tensor(ses01_patches, dtype=torch.float)
-            x2 = torch.tensor(ses02_patches, dtype=torch.float)
+            x2 = torch.zeros_like(x1)
             seg_y = torch.tensor(gt_patches, dtype=torch.float)
             clf_y = torch.tensor(clf_gt_patches, dtype=torch.long)
             # NOTE: The times two is added because of x1 and x2 logic in our current model
 
-            return x1, x2, seg_y, clf_y
+            return index, x1, x2, seg_y, clf_y
 
-        # Return subvolumes, i.e. don't extract patches
+        # Return subvolume, i.e. don't extract patches
         else:
             # Conversion to PyTorch tensors
-            x1 = torch.tensor(ses01_subvolumes, dtype=torch.float)
-            x2 = torch.tensor(ses02_subvolumes, dtype=torch.float)
-            seg_y = torch.tensor(gt_subvolumes, dtype=torch.float)
+            x1 = torch.tensor(ses01_subvolume, dtype=torch.float)
+            x2 = torch.zeros_like(x1)
+            seg_y = torch.tensor(gt_subvolume, dtype=torch.float)
+            clf_y = torch.tensor(int(np.any(gt_subvolume)), dtype=torch.long)
 
-            return x1, x2, seg_y
+            return index, x1, x2, seg_y, clf_y
 
     def __len__(self):
         return len(self.subvolumes)
