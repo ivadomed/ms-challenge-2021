@@ -380,19 +380,23 @@ class MSSeg2Dataset(Dataset):
             # NOTE: We are deleting & overwriting the NIfTI files at each iteration
             pred_nib = nib.Nifti1Image(pred, affine=np.eye(4))
             gtc_nib = nib.Nifti1Image(gtc, affine=np.eye(4))
-            nib.save(img=pred_nib, filename='./pred.nii.gz')
-            nib.save(img=gtc_nib, filename='./gt.nii.gz')
+            nib.save(img=pred_nib, filename=os.path.join(self.results_dir, 'pred.nii.gz'))
+            nib.save(img=gtc_nib, filename=os.path.join(self.results_dir, 'gt.nii.gz'))
 
             # Run ANIMA segmentation performance metrics on the predictions
             # NOTE: We use certain additional arguments below with the following purposes:
             #       -d -> surface distance eval, -l -> detection of lesions eval
-            #       -a -> intra-lesion eval, -s -> segmentation eval, -S -> log to screen
-            seg_perf_analyzer_cmd = '%s -i ./pred.nii.gz -r ./gt.nii.gz -o %s -d -l -a -s -S'
-            os.system(seg_perf_analyzer_cmd % (os.path.join(self.anima_binaries_path, 'animaSegPerfAnalyzer'), os.path.join(self.results_dir, subject)))
+            #       -a -> intra-lesion eval, -s -> segmentation eval, -X -> save as XML file
+            seg_perf_analyzer_cmd = '%s -i %s -r %s -o %s -d -l -a -s -X'
+            os.system(seg_perf_analyzer_cmd %
+                      (os.path.join(self.anima_binaries_path, 'animaSegPerfAnalyzer'),
+                       os.path.join(self.results_dir, 'pred.nii.gz'),
+                       os.path.join(self.results_dir, 'gt.nii.gz'),
+                       os.path.join(self.results_dir, subject)))
 
             # Delete temporary NIfTI files
-            os.remove('./pred.nii.gz')
-            os.remove('./gt.nii.gz')
+            os.remove(os.path.join(self.results_dir, 'pred.nii.gz'))
+            os.remove(os.path.join(self.results_dir, 'gt.nii.gz'))
 
 
 class MSSeg1Dataset(Dataset):
@@ -418,7 +422,7 @@ class MSSeg1Dataset(Dataset):
     def __init__(self, root, resolution=(0.5, 0.5, 0.5), center_crop_size=(512, 512, 512),
                  subvolume_size=(128, 128, 128), stride_size=(64, 64, 64), patch_size=(32, 32, 32),
                  fraction_data=1.0, gt_type='staple', use_patches=True):
-        super(MSSeg2Dataset).__init__()
+        super(MSSeg1Dataset).__init__()
 
         # Quick argument checks
         if not os.path.exists(root):
