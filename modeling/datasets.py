@@ -3,6 +3,8 @@ import os
 import subprocess
 from tqdm import tqdm
 import random
+from collections import defaultdict
+import xml.etree.ElementTree as ET
 import pandas as pd
 import numpy as np
 import nibabel as nib
@@ -397,6 +399,39 @@ class MSSeg2Dataset(Dataset):
             # Delete temporary NIfTI files
             os.remove(os.path.join(self.results_dir, 'pred.nii.gz'))
             os.remove(os.path.join(self.results_dir, 'gt.nii.gz'))
+
+        # Get all XML filepaths where ANIMA performance metrics are saved for each hold-out subject
+        subject_filepaths = [os.path.join(self.results_dir, f) for f in
+                             os.listdir(self.results_dir) if f.endswith('.xml')]
+        test_metrics = defaultdict(list)
+
+        # Update the test metrics dictionary by iterating over all subjects
+        for subject_filepath in subject_filepaths:
+            subject = os.path.split(subject_filepath)[-1].split('_')[0]
+            root_node = ET.parse(source=subject_filepath).getroot()
+
+            # Check if RelativeVolumeError is INF -> means the GT is empty and should be ignored
+            rve_metric = list(root_node)[6]
+            assert rve_metric.get('name') == 'RelativeVolumeError'
+            if np.isinf(float(rve_metric.text)):
+                print('Skipping Subject=%s ENTIRELY Due to Empty GT!' % subject)
+                continue
+
+            for metric in list(root_node):
+                name, value = metric.get('name'), float(metric.text)
+
+                if np.isinf(value) or np.isnan(value):
+                    print('Skipping Metric=%s for Subject=%s Due to INF or NaNs!' % (
+                    name, subject))
+                    continue
+
+                test_metrics[name].append(value)
+
+        # Print aggregation of each metric via mean and standard dev.
+        print('Test Phase Metrics [ANIMA]: ')
+        for key in test_metrics:
+            print('\t%s -> Mean: %0.4f Std: %0.2f' % (
+            key, np.mean(test_metrics[key]), np.std(test_metrics[key])))
 
 
 class MSSeg1Dataset(Dataset):
