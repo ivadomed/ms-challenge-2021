@@ -77,6 +77,8 @@ parser.add_argument('-c', '--continue_from_checkpoint', default=False, action='s
                     help='Load model from checkpoint and continue training')
 parser.add_argument('-clp', '--continue_load_path', default=None, type=str,
                     help='Path to the trained .pt saved model file which we want to finetune / continue training on')
+parser.add_argument('-ls', '--load_strategy', choices=['only_encoder', 'all'], default='all',
+                    help='How to load the weights for a finetuning experiment or continuation')
 parser.add_argument('-se', '--seed', default=42, type=int,
                     help='Set seeds for reproducibility')
 
@@ -154,13 +156,13 @@ def main_worker(rank, world_size):
         state_dict_ = deepcopy(state_dict)
 
         for param in state_dict:
-            # We will be initializing the decoder from scratch, so let's skip those params
-            # NOTE: i.e., we will only be loading learned weights for the encoder part. This
-            #       is how we see people utilizing weights in the literature for MS segmentation.
-            if 'unet_decoder' in param:
-                state_dict_.pop(param)
-                continue
-
+            if args.load_strategy == 'only_encoder':
+                # We will be initializing the decoder from scratch, so let's skip those params
+                # NOTE: i.e., we will only be loading learned weights for the encoder part. This
+                #       is how we see folks utilizing weights in the literature for MS segmentation.
+                if 'unet_decoder' in param:
+                    state_dict_.pop(param)
+                    continue
             # If weights don't match bw. pretrained model and new model, we'll have to rectify it
             if not model.state_dict()[param.replace('module.', '')].shape == state_dict[param].shape:
                 print('WARNING: Weight shapes DONT match for param: ', param, '. Taking care of ' +
