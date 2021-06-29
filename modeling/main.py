@@ -78,7 +78,7 @@ parser.add_argument('-c', '--continue_from_checkpoint', default=False, action='s
 parser.add_argument('-clp', '--continue_load_path', default=None, type=str,
                     help='Path to the trained .pt saved model file which we want to finetune / continue training on')
 parser.add_argument('-ls', '--load_strategy', choices=['only_encoder', 'all'], default='all',
-                    help='How to load the weights for a finetuning experiment or continuation')
+                    help='How to load the weights for a finetuning experiment or continuation / evaluation')
 parser.add_argument('-se', '--seed', default=42, type=int,
                     help='Set seeds for reproducibility')
 
@@ -91,9 +91,6 @@ parser.add_argument('--master_port', type=str, default='29500',
                     help='Port that master is listening on')
 
 args = parser.parse_args()
-
-if args.continue_load_path is not None and not args.continue_from_checkpoint:
-    raise ValueError('You need -c when you specify -clp!')
 
 
 def main_worker(rank, world_size):
@@ -114,6 +111,9 @@ def main_worker(rank, world_size):
     else:
         print('Running Evaluation: (1) Loss metrics on validation set, and (2) ANIMA metrics on test set')
         args.continue_from_checkpoint = True
+
+    if args.continue_load_path is not None and not args.continue_from_checkpoint:
+        raise ValueError('You need -c when you specify -clp!')
 
     if args.local_rank == -1:
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
