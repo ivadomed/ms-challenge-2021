@@ -9,10 +9,12 @@ import pandas as pd
 import numpy as np
 import nibabel as nib
 
+
 import torch
 from torch.utils.data import Dataset
 
-from ivadomed.transforms import Resample, CenterCrop, RandomAffine, NormalizeInstance, ElasticTransform
+from ivadomed.transforms import Resample, CenterCrop, RandomAffine, ElasticTransform, NormalizeInstance
+from torchio.transforms import Compose, RandomBiasField
 
 
 # ---------------------------- Helpers Implementation -----------------------------
@@ -235,7 +237,13 @@ class MSSeg2Dataset(Dataset):
 
         # Training augmentations
         if self.train:
-            # (1.a) Apply random affine: rotation, translation, and scaling with P = 0.6
+            # (1) Apply random LR (lateral / left-right) flipping (i.e. axis=0) with P = 0.5
+            if random.random() < 0.5:
+                ses01_subvolume = np.flip(ses01_subvolume, axis=0)
+                ses02_subvolume = np.flip(ses02_subvolume, axis=0)
+                gt_subvolume = np.flip(gt_subvolume, axis=0)
+
+            # (2.a) Apply random affine: rotation, translation, and scaling with P = 0.6
             if random.random() < 0.6:
                 # NOTE: `metadata` ensures that the same affine is applied to all three subvolumes
                 # NOTE: We don't want to mess the scale up too much as we use 0.5 x 0.5 x 0.5 mm^3
@@ -243,7 +251,7 @@ class MSSeg2Dataset(Dataset):
                 ses01_subvolume, metadata = random_affine(sample=ses01_subvolume, metadata={})
                 ses02_subvolume, _ = random_affine(sample=ses02_subvolume, metadata=metadata)
                 gt_subvolume, _ = random_affine(sample=gt_subvolume, metadata=metadata)
-            # (1.b) Apply random elastic transform with P = 0.4
+            # (2.b) Apply random elastic transform with P = 0.4
             else:
                 # NOTE: `metadata` ensures that the same affine is applied to all three subvolumes
                 random_elastic_transform = ElasticTransform(alpha_range=(25.0, 35.0), sigma_range=(3.5, 5.5), p=1.0)
@@ -251,7 +259,17 @@ class MSSeg2Dataset(Dataset):
                 ses02_subvolume, _ = random_elastic_transform(sample=ses02_subvolume, metadata=metadata)
                 gt_subvolume, _ = random_elastic_transform(sample=gt_subvolume, metadata=metadata)
 
-        # (2) Normalize images to zero mean and unit variance
+            # (3) Apply random bias to mimic MRI bias-field artifact with P = 0.25 (independently)
+            # NOTE: `torchio` expects 4D tensor with channel dim. so we unsqueeze & squeeze
+            random_bias_field = Compose([RandomBiasField(coefficients=random.choice([0.1, 0.2, 0.3]), order=3, p=0.25)])
+            ses01_subvolume = random_bias_field(ses01_subvolume[np.newaxis, ...])[0, :, :, :]
+            random_bias_field = Compose([RandomBiasField(coefficients=random.choice([0.1, 0.2, 0.3]), order=3, p=0.25)])
+            ses02_subvolume = random_bias_field(ses02_subvolume[np.newaxis, ...])[0, :, :, :]
+
+        # Do a check on subvolume sizes after the applied augmentations
+        assert ses01_subvolume.shape == ses02_subvolume.shape == gt_subvolume.shape == self.subvolume_size
+
+        # Normalize images to zero mean and unit variance
         if ses01_subvolume.std() < 1e-5 or ses02_subvolume.std() < 1e-5:
             # If subvolumes uniform: do mean-subtraction
             ses01_subvolume = ses01_subvolume - ses01_subvolume.mean()
@@ -260,8 +278,6 @@ class MSSeg2Dataset(Dataset):
             normalize_instance = NormalizeInstance()
             ses01_subvolume, _ = normalize_instance(sample=ses01_subvolume, metadata={})
             ses02_subvolume, _ = normalize_instance(sample=ses02_subvolume, metadata={})
-
-        # TODO: Explore torhcio and other data-augmentation strategies (@naga-karthik)
 
         # Extract & return patches from subvolumes (if applicable -> needed for transformer model)
         if self.use_patches and self.subvolume_size != self.patch_size:
@@ -337,7 +353,7 @@ class MSSeg2Dataset(Dataset):
             for i in range(len(ses01_subvolumes)):
                 ses01_subvolume, ses02_subvolume, gtc_subvolume = ses01_subvolumes[i], ses02_subvolumes[i], gtc_subvolumes[i]
 
-                # (2) Normalize images to zero mean and unit variance
+                # Normalize images to zero mean and unit variance
                 if ses01_subvolume.std() < 1e-5 or ses02_subvolume.std() < 1e-5:
                     # If subvolumes uniform: do mean-subtraction
                     ses01_subvolume = ses01_subvolume - ses01_subvolume.mean()
@@ -421,8 +437,7 @@ class MSSeg2Dataset(Dataset):
                 name, value = metric.get('name'), float(metric.text)
 
                 if np.isinf(value) or np.isnan(value):
-                    print('Skipping Metric=%s for Subject=%s Due to INF or NaNs!' % (
-                    name, subject))
+                    print('Skipping Metric=%s for Subject=%s Due to INF or NaNs!' % (name, subject))
                     continue
 
                 test_metrics[name].append(value)
@@ -430,8 +445,7 @@ class MSSeg2Dataset(Dataset):
         # Print aggregation of each metric via mean and standard dev.
         print('Test Phase Metrics [ANIMA]: ')
         for key in test_metrics:
-            print('\t%s -> Mean: %0.4f Std: %0.2f' % (
-            key, np.mean(test_metrics[key]), np.std(test_metrics[key])))
+            print('\t%s -> Mean: %0.4f Std: %0.2f' % (key, np.mean(test_metrics[key]), np.std(test_metrics[key])))
 
 
 class MSSeg1Dataset(Dataset):
@@ -571,20 +585,33 @@ class MSSeg1Dataset(Dataset):
         ses01_subvolume, gt_subvolume = subvolumes['ses01'], subvolumes['gt']
 
         if self.train:
-            # (1.a) Apply random affine: rotation, translation, and scaling with P = 0.6
+            # (1) Apply random LR (lateral / left-right) flipping (i.e. axis=0) with P = 0.5
+            if random.random() < 0.5:
+                ses01_subvolume = np.flip(ses01_subvolume, axis=0)
+                gt_subvolume = np.flip(gt_subvolume, axis=0)
+
+            # (2.a) Apply random affine: rotation, translation, and scaling with P = 0.6
             if random.random() < 0.6:
                 # NOTE: `metadata` ensures that the same affine is applied to all three subvolumes
                 random_affine = RandomAffine(degrees=45, translate=[0.25, 0.25, 0.25], scale=[0.025, 0.025, 0.025])
                 ses01_subvolume, metadata = random_affine(sample=ses01_subvolume, metadata={})
                 gt_subvolume, _ = random_affine(sample=gt_subvolume, metadata=metadata)
-            # (1.b) Apply random elastic transform with P = 0.4
+            # (2.b) Apply random elastic transform with P = 0.4
             else:
                 # NOTE: `metadata` ensures that the same affine is applied to all three subvolumes
                 random_elastic_transform = ElasticTransform(alpha_range=(25.0, 35.0), sigma_range=(3.5, 5.5), p=1.0)
                 ses01_subvolume, metadata = random_elastic_transform(sample=ses01_subvolume, metadata={})
                 gt_subvolume, _ = random_elastic_transform(sample=gt_subvolume, metadata=metadata)
 
-        # (2) Normalize images to zero mean and unit variance
+            # (3) Apply random bias to mimic MRI bias-field artifact with P = 0.25
+            # NOTE: `torchio` expects 4D tensor with channel dim. so we unsqueeze & squeeze
+            random_bias_field = Compose([RandomBiasField(coefficients=random.choice([0.1, 0.2, 0.3]), order=3, p=0.25)])
+            ses01_subvolume = random_bias_field(ses01_subvolume[np.newaxis, ...])[0, :, :, :]
+
+        # Do a check on subvolume sizes after the applied augmentations
+        assert ses01_subvolume.shape == gt_subvolume.shape == self.subvolume_size
+
+        # Normalize images to zero mean and unit variance
         if ses01_subvolume.std() < 1e-5:
             # If subvolume uniform: do mean-subtraction
             # NOTE: This will also help with discarding empty inputs!
