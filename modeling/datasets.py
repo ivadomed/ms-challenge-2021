@@ -136,7 +136,7 @@ class MSSeg2Dataset(Dataset):
         if any([center_crop_size[i] < subvolume_size[i] for i in range(3)]):
             raise ValueError('The center crop size must be >= subvolume size in all dimensions!')
         if any([(center_crop_size[i] - subvolume_size[i]) % stride_size[i] != 0 for i in range(3)]):
-            raise ValueError('center_crop_size - subvolume_size % stride size must be 0 for all dimensions!')
+            print('center_crop_size - subvolume_size % stride size is NOT 0 for all dimensions!')
         if any([subvolume_size[i] < patch_size[i] for i in range(3)]):
             raise ValueError('The subvolume size must be >= patch size in all dimensions!')
 
@@ -489,7 +489,7 @@ class MSSeg1Dataset(Dataset):
         if any([center_crop_size[i] < subvolume_size[i] for i in range(3)]):
             raise ValueError('The center crop size must be >= subvolume size in all dimensions!')
         if any([(center_crop_size[i] - subvolume_size[i]) % stride_size[i] != 0 for i in range(3)]):
-            raise ValueError('center_crop_size - subvolume_size % stride size must be 0 for all dimensions!')
+            print('center_crop_size - subvolume_size % stride size is NOT 0 for all dimensions!')
         if any([subvolume_size[i] < patch_size[i] for i in range(3)]):
             raise ValueError('The subvolume size must be >= patch size in all dimensions!')
 
