@@ -1,4 +1,5 @@
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 from copy import deepcopy
 import argparse
 
@@ -24,9 +25,9 @@ parser.add_argument('-e', '--only_eval', default=False, action='store_true',
                     help='Only do evaluation, i.e. skip training!')
 parser.add_argument('-id', '--model_id', default='transunet', type=str,
                     help='Model ID to-be-used for saving the .pt saved model file')
-parser.add_argument('-m', '--model_type', choices=['transunet', 'unet'], default='transunet', type=str,
+parser.add_argument('-m', '--model_type', choices=['transunet', 'unet', 'attnunet'], default='transunet', type=str,
                     help='Model type to be used')
-parser.add_argument('-dr', '--dataset_root', default='/home/GRAMES.POLYMTL.CA/uzmac/duke/projects/ivadomed/tmp_ms_challenge_2021_preprocessed', type=str,
+parser.add_argument('-dr', '--dataset_root', default='/home/GRAMES.POLYMTL.CA/u114716/duke/projects/ivadomed/tmp_ms_challenge_2021_preprocessed', type=str,
                     help='Root path to the BIDS- and ivadomed-compatible dataset')
 
 parser.add_argument('-t', '--task', choices=['1', '2'], default='2', type=str,
@@ -41,7 +42,7 @@ parser.add_argument('-srs', '--stride_size', default=32, type=int,
 parser.add_argument('-ps', '--patch_size', default=16, type=int,
                     help='Set the patch size to be used in training & validation. (TransUNet3D-specific)')
 
-parser.add_argument('-fd', '--fraction_data', default=1.0, type=float,
+parser.add_argument('-fd', '--fraction_data', default=0.3, type=float,
                     help='Fraction of data to use for the experiment. Helps with debugging.')
 parser.add_argument('-fho', '--fraction_hold_out', default=0.2, type=float,
                     help='Fraction of data to hold-out of for the test phase')
@@ -50,7 +51,7 @@ parser.add_argument('-ft', '--fraction_train', default=0.8, type=float,
 parser.add_argument('-v', '--visualize_test_preds', default=False, action='store_true',
                     help='Enable to save subvolume predictions during the test phase for visual assessment')
 
-parser.add_argument('-ne', '--num_epochs', default=200, type=int,
+parser.add_argument('-ne', '--num_epochs', default=100, type=int,
                     help='Number of epochs for the training process')
 parser.add_argument('-bs', '--batch_size', default=20, type=int,
                     help='Batch size of the training and validation processes')
@@ -59,10 +60,10 @@ parser.add_argument('-nw', '--num_workers', default=4, type=int,
 
 parser.add_argument('-sl', '--seg_loss', choices=['dice', 'generalized_dice', 'adap_wing', 'focal_tversky_loss'], default='dice', type=str,
                     help='Select the primary loss for the segmentation task')
-parser.add_argument('-bal', '--balance_strategy', choices=['none', 'naive_duplication', 'cheap_duplication', 'naive_removal'], default='none', type=str,
+parser.add_argument('-bal', '--balance_strategy', choices=['none', 'naive_duplication', 'cheap_duplication', 'naive_removal'], default='naive_duplication', type=str,
                     help='The balancing strategy to employ for the training subset')
 
-parser.add_argument('-lr', '--learning_rate', default=5e-5, type=float,
+parser.add_argument('-lr', '--learning_rate', default=3e-5, type=float,
                     help='Learning rate for training the model')
 parser.add_argument('-wd', '--weight_decay', type=float, default=0.01,
                     help='Weight decay (i.e. regularization) value in AdamW')
@@ -91,6 +92,10 @@ parser.add_argument('--master_port', type=str, default='29500',
                     help='Port that master is listening on')
 
 args = parser.parse_args()
+
+# TODO: (1) Try Attention Gated blocks in 3D U-Net,
+#  (2) Different data augmentation methods, even those that were not approved,
+#  (3)
 
 
 def main_worker(rank, world_size):
@@ -135,13 +140,13 @@ def main_worker(rank, world_size):
                       dropout_rate=0.5,
                       layer_norm_eps=1e-7,
                       aux_clf_task=False,
-                      base_n_filter=8,     # TODO: Try to increase base_n_filter w/o breaking code!
+                      base_n_filter=16,     # TODO: Try to increase base_n_filter w/o breaking code!
                       device=device)
 
     model = None
     if args.model_type == 'transunet':
         model = TransUNet3D(cfg=cfg)
-    elif args.model_type == 'unet':
+    elif args.model_type in ['unet', 'attnunet']:
         model = ModifiedUNet3D(cfg=cfg)
 
     # Load saved model if applicable
