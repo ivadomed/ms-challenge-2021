@@ -45,7 +45,7 @@ class ModelConfig(object):
     """
     def __init__(self, task, subvolume_size, patch_size, hidden_size, mlp_dim, num_layers,
                  num_heads, attention_dropout_rate, dropout_rate, layer_norm_eps, aux_clf_task,
-                 base_n_filter, device):
+                 base_n_filter, attention_gates, device):
         self.task = task
         self.subvolume_size = subvolume_size
         self.patch_size = patch_size
@@ -58,6 +58,7 @@ class ModelConfig(object):
         self.layer_norm_eps = layer_norm_eps
         self.aux_clf_task = aux_clf_task
         self.base_n_filter = base_n_filter
+        self.attention_gates = attention_gates
         self.device = device
 
         self.num_patches = (self.subvolume_size // self.patch_size) ** 3
@@ -537,7 +538,7 @@ class ModifiedUNet3D(nn.Module):
         self.cfg = cfg
         self.unet_encoder = ModifiedUNet3DEncoder(cfg, in_channels=1 if cfg.task == '1' else 2,
                                                   base_n_filter=cfg.base_n_filter, flatten=False,
-                                                  attention=True)
+                                                  attention=cfg.attention_gates)
         if self.cfg.aux_clf_task:
             self.clf = ClassificationPredictionHead(cfg)
         self.unet_decoder = ModifiedUNet3DDecoder(cfg, n_classes=1, base_n_filter=cfg.base_n_filter)

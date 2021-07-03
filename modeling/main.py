@@ -25,7 +25,7 @@ parser.add_argument('-e', '--only_eval', default=False, action='store_true',
                     help='Only do evaluation, i.e. skip training!')
 parser.add_argument('-id', '--model_id', default='transunet', type=str,
                     help='Model ID to-be-used for saving the .pt saved model file')
-parser.add_argument('-m', '--model_type', choices=['transunet', 'unet', 'attnunet'], default='transunet', type=str,
+parser.add_argument('-m', '--model_type', choices=['transunet', 'unet', 'attentionunet'], default='transunet', type=str,
                     help='Model type to be used')
 parser.add_argument('-dr', '--dataset_root', default='/home/GRAMES.POLYMTL.CA/u114716/duke/projects/ivadomed/tmp_ms_challenge_2021_preprocessed', type=str,
                     help='Root path to the BIDS- and ivadomed-compatible dataset')
@@ -42,7 +42,7 @@ parser.add_argument('-srs', '--stride_size', default=32, type=int,
 parser.add_argument('-ps', '--patch_size', default=16, type=int,
                     help='Set the patch size to be used in training & validation. (TransUNet3D-specific)')
 
-parser.add_argument('-fd', '--fraction_data', default=0.3, type=float,
+parser.add_argument('-fd', '--fraction_data', default=1.0, type=float,
                     help='Fraction of data to use for the experiment. Helps with debugging.')
 parser.add_argument('-fho', '--fraction_hold_out', default=0.2, type=float,
                     help='Fraction of data to hold-out of for the test phase')
@@ -93,9 +93,7 @@ parser.add_argument('--master_port', type=str, default='29500',
 
 args = parser.parse_args()
 
-# TODO: (1) Try Attention Gated blocks in 3D U-Net,
-#  (2) Different data augmentation methods, even those that were not approved,
-#  (3)
+# TODO: (2) Different data augmentation methods, even those that were not approved,
 
 
 def main_worker(rank, world_size):
@@ -141,12 +139,13 @@ def main_worker(rank, world_size):
                       layer_norm_eps=1e-7,
                       aux_clf_task=False,
                       base_n_filter=16,     # TODO: Try to increase base_n_filter w/o breaking code!
+                      attention_gates=True if args.model_type == 'attentionunet' else False,
                       device=device)
 
     model = None
     if args.model_type == 'transunet':
         model = TransUNet3D(cfg=cfg)
-    elif args.model_type in ['unet', 'attnunet']:
+    elif args.model_type in ['unet', 'attentionunet']:
         model = ModifiedUNet3D(cfg=cfg)
 
     # Load saved model if applicable
