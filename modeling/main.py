@@ -1,5 +1,4 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 from copy import deepcopy
 import argparse
 
@@ -41,6 +40,7 @@ parser.add_argument('-srs', '--stride_size', default=32, type=int,
                     help='Set the stride / translation size to be used in training & validation')
 parser.add_argument('-ps', '--patch_size', default=16, type=int,
                     help='Set the patch size to be used in training & validation. (TransUNet3D-specific)')
+parser.add_argument('-bnf', '--base_n_filter', default=8, type=int, help="Number of Base Filters")
 
 parser.add_argument('-fd', '--fraction_data', default=1.0, type=float,
                     help='Fraction of data to use for the experiment. Helps with debugging.')
@@ -138,7 +138,7 @@ def main_worker(rank, world_size):
                       dropout_rate=0.5,
                       layer_norm_eps=1e-7,
                       aux_clf_task=False,
-                      base_n_filter=16,     # TODO: Try to increase base_n_filter w/o breaking code!
+                      base_n_filter=args.base_n_filter,     # TODO: Try to increase base_n_filter w/o breaking code!
                       attention_gates=True if args.model_type == 'attentionunet' else False,
                       device=device)
 
