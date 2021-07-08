@@ -98,10 +98,10 @@ args = parser.parse_args()
 
 def main_worker(rank, world_size):
     # Configure model ID & append important / distinguishing args to model_id
-    model_id = '%s-t=%s-gt=%s-bs=%d-sl=%s-bal=%s-lr=%s-svs=%d-srs=%d' % \
+    model_id = '%s-t=%s-gt=%s-bs=%d-sl=%s-bal=%s-lr=%s-svs=%d-srs=%d-bnf=%d-se=%d' % \
                (args.model_id, args.task, args.gt_type, args.batch_size,
                 args.seg_loss, args.balance_strategy, str(args.learning_rate),
-                args.subvolume_size, args.stride_size)
+                args.subvolume_size, args.stride_size, args.base_n_filter, args.seed)
     print('MODEL ID: %s' % model_id)
     print('RANK: ', rank)
 
