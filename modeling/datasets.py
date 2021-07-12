@@ -76,6 +76,27 @@ def subvolume2patches(subvolume, patch_size):
     return patches
 
 
+def patches2subvolume(patches, subvolume_size):
+    """Converts list of 3D patches into 3D subvolumes; works with NumPy arrays."""
+    assert len(subvolume_size) == 3
+    patch_size = patches[0].shape
+    subvolume = np.zeros(subvolume_size)
+
+    num_patches_per_dim = [subvolume_size[i] // patch_size[i] for i in range(3)]
+
+    for i, x in enumerate(range(0, (subvolume_size[0] - patch_size[0]) + 1, patch_size[0])):
+        for j, y in enumerate(range(0, (subvolume_size[1] - patch_size[1]) + 1, patch_size[1])):
+            for k, z in enumerate(range(0, (subvolume_size[2] - patch_size[2]) + 1, patch_size[2])):
+                # Get the patch index for the corresponding spatial location
+                patch_index = i * np.prod(num_patches_per_dim[1:]) + j * num_patches_per_dim[2] + k
+                # Fill in the subvolume with the corresponding patch
+                subvolume[x: x + patch_size[0],
+                          y: y + patch_size[1],
+                          z: z + patch_size[2]] = patches[patch_index]
+
+    return subvolume
+
+
 # ---------------------------- Datasets Implementation -----------------------------
 class MSSeg2Dataset(Dataset):
     """
@@ -314,8 +335,26 @@ class MSSeg2Dataset(Dataset):
         """Implements the test phase via animaSegPerfAnalyzer"""
         assert model is not None
 
+        # Convert to list in case we need to assign new values in the next code block
+        adjusted_center_crop_size = list(self.center_crop_size)
+
+        # Center-crop size vs. subvolume size check to see if we need to pad the inputs or not
+        for i in range(3):
+            ccs_i, svs_i = adjusted_center_crop_size[i], self.subvolume_size[i]
+            if ccs_i % svs_i != 0:
+                # Minimally pad the initial center-crop size s.t. it becomes divisible by SV
+                adjusted_center_crop_size[i] = ((ccs_i // svs_i) * svs_i) + svs_i
+
+        # Convert back to tuple for the center-crop parameter to be immutable again
+        adjusted_center_crop_size = tuple(adjusted_center_crop_size)
+
+        # Report center-crop size parameters
+        print('Original Center-Crop Size: ', self.center_crop_size)
+        if adjusted_center_crop_size != self.center_crop_size:
+            print('[WARNING] Adjusted Center-Crop Size: ', adjusted_center_crop_size)
+
         # Compute num. subvolumes per dim and total for a quick check later on
-        num_subvolumes_per_dim = [self.center_crop_size[i] // self.subvolume_size[i] for i in range(3)]
+        num_subvolumes_per_dim = [adjusted_center_crop_size[i] // self.subvolume_size[i] for i in range(3)]
         num_subvolumes = np.prod(num_subvolumes_per_dim)
 
         for subject_no, subject in enumerate(tqdm(self.subjects_hold_out, desc='Testing Phase')):
@@ -336,7 +375,7 @@ class MSSeg2Dataset(Dataset):
             ses01, ses02, gtc = ses01.get_fdata(), ses02.get_fdata(), gtc.get_fdata()
 
             # Apply center-cropping
-            center_crop = CenterCrop(size=self.center_crop_size)
+            center_crop = CenterCrop(size=adjusted_center_crop_size)
             ses01 = center_crop(sample=ses01, metadata={'crop_params': {}})[0]
             ses02 = center_crop(sample=ses02, metadata={'crop_params': {}})[0]
             gtc = center_crop(sample=gtc, metadata={'crop_params': {}})[0]
@@ -363,14 +402,22 @@ class MSSeg2Dataset(Dataset):
                     ses01_subvolume, _ = normalize_instance(sample=ses01_subvolume, metadata={})
                     ses02_subvolume, _ = normalize_instance(sample=ses02_subvolume, metadata={})
 
-                # TODO: Configure patches for TransUNet3D
+                # NOTE: Create twice-unsqueezed tensors with batch_size=1 and num_channels=1
+                if self.use_patches:
+                    ses01_patches = subvolume2patches(ses01_subvolume, patch_size=self.patch_size)
+                    ses02_patches = subvolume2patches(ses02_subvolume, patch_size=self.patch_size)
+                    x1 = torch.tensor(ses01_patches, dtype=torch.float).view(1, ses01_patches.shape[0], 1, *ses01_patches.shape[1:]).to(device)
+                    x2 = torch.tensor(ses02_patches, dtype=torch.float).view(1, ses02_patches.shape[0], 1, *ses02_patches.shape[1:]).to(device)
+                else:
+                    x1 = torch.tensor(ses01_subvolume, dtype=torch.float).view(1, 1, *ses01_subvolume.shape).to(device)
+                    x2 = torch.tensor(ses02_subvolume, dtype=torch.float).view(1, 1, *ses02_subvolume.shape).to(device)
 
-                # NOTE: Unsqueeze tensors twice for the batch_size=1 and num_channels=1 effect
-                x1 = torch.tensor(ses01_subvolume, dtype=torch.float).view(1, 1, *ses01_subvolume.shape).to(device)
-                x2 = torch.tensor(ses02_subvolume, dtype=torch.float).view(1, 1, *ses02_subvolume.shape).to(device)
+                # Get the subvolume prediction
+                seg_y_hat = model(x1, x2).squeeze().detach().cpu().numpy()
+                if self.use_patches:
+                    seg_y_hat = patches2subvolume(patches=list(seg_y_hat), subvolume_size=self.subvolume_size)
 
-                seg_y_hat = model(x1, x2).detach().cpu().numpy()
-
+                # Optional visualization for manual assessment of performance
                 if self.visualize_test_preds:
                     if np.any(gtc_subvolume):
                         seg_y_hat_nib = nib.Nifti1Image(seg_y_hat, affine=np.eye(4))
@@ -381,18 +428,24 @@ class MSSeg2Dataset(Dataset):
                 pred_subvolumes.append(seg_y_hat)
 
             # Convert the list of subvolume predictions to a single volume segmentation / prediction
-            pred = subvolumes2volume(subvolumes=pred_subvolumes, volume_size=self.center_crop_size)
+            pred = subvolumes2volume(subvolumes=pred_subvolumes, volume_size=adjusted_center_crop_size)
             assert pred.shape == gtc.shape
+
+            # Apply the original center-crop size in case it was adjusted before
+            if pred.shape != self.center_crop_size:
+                gtc_sum_before_crop = np.sum(gtc)
+                center_crop = CenterCrop(size=self.center_crop_size)
+                pred = center_crop(sample=pred, metadata={'crop_params': {}})[0]
+                gtc = center_crop(sample=gtc, metadata={'crop_params': {}})[0]
+
+                # Check if padding & un-padding removes any lesion GTs; only continue if it does not
+                if abs(np.sum(gtc) - gtc_sum_before_crop) > 1e-6:
+                    # NOTE: Apparently np.sum() can have epsilon differences even with same values!
+                    raise ValueError('Padding & un-padding cropped out lesions! Check your center-crop parameters!')
 
             # Convert predictions and GT to binary to be compatible with ANIMA metrics
             pred = np.array(pred > 0.5, dtype=float)
             gtc = np.array(gtc > 0.5, dtype=float)
-
-            # TODO: Also here we will need to run evaluation on the original GT in the actual
-            #       testing phase of the challenge, which will require us to
-            #       (i) downsample the pred. to the original resolution of the GT,
-            #       (ii) remove center-cropping in this script,
-            #       (iii) remove ROI-cropping in the preprocessing.
 
             # Save the prediction and the center-cropped GT as new NIfTI files
             # NOTE: We are deleting & overwriting the NIfTI files at each iteration
