@@ -74,7 +74,7 @@ parser.add_argument('--eps', type=float, default=1e-8,
 
 parser.add_argument('-mcd', '--mc_dropout', default=False, action='store_true',
                     help='To use Monte Carlo samples for validation and testing')
-parser.add_argument('-n_mc', '--num_mc_samples', default=5, type=int, help="Number of MC samples to use")
+parser.add_argument('-n_mc', '--num_mc_samples', default=0, type=int, help="Number of MC samples to use")
 
 parser.add_argument('-s', '--save', default='./saved_models', type=str,
                     help='Path to the saved models directory')
@@ -538,7 +538,7 @@ def main_worker(rank, world_size):
             dataset.train = False
             if args.mc_dropout:
                 enable_dropout(model)   # enabling only dropout for the test phase
-            dataset.test(model=model, device=device, is_mcd=args.mc_dropout, num_mc_samples=args.num_mc_samples)
+            dataset.test(model=model, device=device, num_mc_samples=args.num_mc_samples)
             exit(0)
 
     # Cleanup DDP if applicable

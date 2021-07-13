@@ -331,7 +331,7 @@ class MSSeg2Dataset(Dataset):
     def __len__(self):
         return len(self.subvolumes)
 
-    def test(self, model, device, is_mcd, num_mc_samples):
+    def test(self, model, device, num_mc_samples):
         """Implements the test phase via animaSegPerfAnalyzer"""
         assert model is not None
 
@@ -412,7 +412,7 @@ class MSSeg2Dataset(Dataset):
                     x1 = torch.tensor(ses01_subvolume, dtype=torch.float).view(1, 1, *ses01_subvolume.shape).to(device)
                     x2 = torch.tensor(ses02_subvolume, dtype=torch.float).view(1, 1, *ses02_subvolume.shape).to(device)
 
-                if is_mcd:   # Do Monte Carlo Averaging
+                if num_mc_samples > 0:   # Do Monte Carlo Averaging
                     seg_y_hats = []
                     # Forward pass through the network num_mc_samples times and combine them by averaging.
                     for i_mc in range(num_mc_samples):
