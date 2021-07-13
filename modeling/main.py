@@ -72,6 +72,10 @@ parser.add_argument('--betas', type=tuple, default=(0.9, 0.999),
 parser.add_argument('--eps', type=float, default=1e-8,
                     help='Epsilon value for the AdamW optimizer')
 
+parser.add_argument('-mcd', '--mc_dropout', default=False, action='store_true',
+                    help='To use Monte Carlo samples for validation and testing')
+parser.add_argument('-n_mc', '--num_mc_samples', default=5, type=int, help="Number of MC samples to use")
+
 parser.add_argument('-s', '--save', default='./saved_models', type=str,
                     help='Path to the saved models directory')
 parser.add_argument('-c', '--continue_from_checkpoint', default=False, action='store_true',
@@ -93,15 +97,29 @@ parser.add_argument('--master_port', type=str, default='29500',
 
 args = parser.parse_args()
 
-# TODO: (2) Different data augmentation methods, even those that were not approved,
+
+# Explicitly enabling (only) dropout - will be used during validation and test phases (for MC Dropout)
+def enable_dropout(m):
+    # # Method 1:
+    # if type(m) == nn.Dropout:
+    #     m.train()
+    # Method 2:
+    for module in m.modules():
+        if module.__class__.__name__.startswith('Dropout'):
+            module.train()
 
 
 def main_worker(rank, world_size):
     # Configure model ID & append important / distinguishing args to model_id
-    model_id = '%s-t=%s-gt=%s-bs=%d-sl=%s-bal=%s-lr=%s-svs=%d-srs=%d-bnf=%d-se=%d' % \
-               (args.model_id, args.task, args.gt_type, args.batch_size,
-                args.seg_loss, args.balance_strategy, str(args.learning_rate),
-                args.subvolume_size, args.stride_size, args.base_n_filter, args.seed)
+    if args.mc_dropout:
+        model_id = '%s-t=%s-gt=%s-bs=%d-sl=%s-bal=%s-lr=%s-svs=%d-srs=%d-bnf=%d-se=%d-nmc=%d' % \
+            (args.model_id, args.task, args.gt_type, args.batch_size, args.seg_loss, args.balance_strategy,
+             str(args.learning_rate), args.subvolume_size, args.stride_size, args.base_n_filter, args.seed,
+             args.num_mc_samples)
+    else:
+        model_id = '%s-t=%s-gt=%s-bs=%d-sl=%s-bal=%s-lr=%s-svs=%d-srs=%d-bnf=%d-se=%d' % \
+            (args.model_id, args.task, args.gt_type, args.batch_size, args.seg_loss, args.balance_strategy,
+             str(args.learning_rate), args.subvolume_size, args.stride_size, args.base_n_filter, args.seed)
     print('MODEL ID: %s' % model_id)
     print('RANK: ', rank)
 
@@ -385,48 +403,97 @@ def main_worker(rank, world_size):
         # -------------------------------- VALIDATION PHASE ------------------------------------
         model.eval()
         dataset.train = False
-        val_epoch_losses, val_epoch_accuracies = {'seg': 0.0, 'soft_dice': 0.0, 'hard_dice': 0.0}, {}
         if cfg.aux_clf_task:
             val_epoch_losses['clf'] = 0.0
             val_epoch_accuracies = {'acc': 0.0, 'pos_acc': 0.0, 'neg_acc': 0.0}
 
         with torch.no_grad():
-            for batch in tqdm(val_loader, desc='Iterating over Validation Examples'):
-                dataset_indices, x1, x2, seg_y, clf_y = batch
-                x1, x2, seg_y, clf_y = x1.to(device), x2.to(device), seg_y.to(device), clf_y.to(device)
+            if args.mc_dropout:
+                print(); print("Averaging over MC samples!")
+                val_epoch_losses_mc = {'mc_seg': 0.0, 'mc_soft_dice': 0.0, 'mc_hard_dice': 0.0}
 
-                # Unsqueeze input patches in the channel dimension
-                if dataset.use_patches:
-                    x1, x2 = x1.unsqueeze(2), x2.unsqueeze(2)
-                else:
-                    x1, x2 = x1.unsqueeze(1), x2.unsqueeze(1)
+                # enable only dropout layers if true
+                enable_dropout(model)
 
-                with torch.cuda.amp.autocast():
-                    if cfg.aux_clf_task:
-                        clf_y_hat, seg_y_hat = model(x1, x2)
+                # run validation loop till the number of MC samples
+                for i_mc in range(args.num_mc_samples):
+                    val_epoch_losses = {'seg': 0.0, 'soft_dice': 0.0, 'hard_dice': 0.0}
+
+                    for batch in tqdm(val_loader, desc='Iterating over Validation Examples'):
+                        dataset_indices, x1, x2, seg_y, clf_y = batch
+                        x1, x2, seg_y, clf_y = x1.to(device), x2.to(device), seg_y.to(device), clf_y.to(device)
+
+                        # Unsqueeze input patches in the channel dimension
+                        if dataset.use_patches:
+                            x1, x2 = x1.unsqueeze(2), x2.unsqueeze(2)
+                        else:
+                            x1, x2 = x1.unsqueeze(1), x2.unsqueeze(1)
+
+                        with torch.cuda.amp.autocast():
+                            if cfg.aux_clf_task:
+                                clf_y_hat, seg_y_hat = model(x1, x2)
+                            else:
+                                seg_y_hat = model(x1, x2)
+
+                            seg_loss = seg_criterion(seg_y_hat, seg_y)
+                            if cfg.aux_clf_task:
+                                clf_loss = clf_criterion(clf_y_hat.permute(0, 2, 1), clf_y)
+
+                        # Update metrics
+                        val_epoch_losses['seg'] += seg_loss.item()
+                        val_epoch_losses['soft_dice'] += dice_metric(seg_y_hat.detach(), seg_y.detach()).detach().item()
+                        val_epoch_losses['hard_dice'] += dice_metric((seg_y_hat.detach() > 0.5).float(), (seg_y.detach() > 0.5).float()).detach().item()
+
+                    for key in val_epoch_losses:
+                        val_epoch_losses[key] /= len(val_loader)
+
+                    # Update Monte-Carlo metrics
+                    val_epoch_losses_mc['mc_seg'] += val_epoch_losses['seg']
+                    val_epoch_losses_mc['mc_soft_dice'] += val_epoch_losses['soft_dice']
+                    val_epoch_losses_mc['mc_hard_dice'] += val_epoch_losses['hard_dice']
+
+                for key in val_epoch_losses_mc:
+                    val_epoch_losses_mc[key] /= args.num_mc_samples
+
+            else:
+                print(); print("Standard Validation, No Monte Carlo Averaging!")
+                val_epoch_losses, val_epoch_accuracies = {'seg': 0.0, 'soft_dice': 0.0, 'hard_dice': 0.0}, {}
+                for batch in tqdm(val_loader, desc='Iterating over Validation Examples'):
+                    dataset_indices, x1, x2, seg_y, clf_y = batch
+                    x1, x2, seg_y, clf_y = x1.to(device), x2.to(device), seg_y.to(device), clf_y.to(device)
+
+                    # Unsqueeze input patches in the channel dimension
+                    if dataset.use_patches:
+                        x1, x2 = x1.unsqueeze(2), x2.unsqueeze(2)
                     else:
-                        seg_y_hat = model(x1, x2)
+                        x1, x2 = x1.unsqueeze(1), x2.unsqueeze(1)
 
-                    seg_loss = seg_criterion(seg_y_hat, seg_y)
+                    with torch.cuda.amp.autocast():
+                        if cfg.aux_clf_task:
+                            clf_y_hat, seg_y_hat = model(x1, x2)
+                        else:
+                            seg_y_hat = model(x1, x2)
+
+                        seg_loss = seg_criterion(seg_y_hat, seg_y)
+                        if cfg.aux_clf_task:
+                            clf_loss = clf_criterion(clf_y_hat.permute(0, 2, 1), clf_y)
+
+                    # Update metrics
+                    val_epoch_losses['seg'] += seg_loss.item()
+                    val_epoch_losses['soft_dice'] += dice_metric(seg_y_hat.detach(), seg_y.detach()).detach().item()
+                    val_epoch_losses['hard_dice'] += dice_metric((seg_y_hat.detach() > 0.5).float(), (seg_y.detach() > 0.5).float()).detach().item()
                     if cfg.aux_clf_task:
-                        clf_loss = clf_criterion(clf_y_hat.permute(0, 2, 1), clf_y)
+                        val_epoch_losses['clf'] += clf_loss.item()
+                        acc, pos_acc, neg_acc = binary_accuracy(clf_y_hat, clf_y)
+                        val_epoch_accuracies['acc'] += acc.item()
+                        val_epoch_accuracies['pos_acc'] += pos_acc.item()
+                        val_epoch_accuracies['neg_acc'] += neg_acc.item()
 
-                # Update metrics
-                val_epoch_losses['seg'] += seg_loss.item()
-                val_epoch_losses['soft_dice'] += dice_metric(seg_y_hat.detach(), seg_y.detach()).detach().item()
-                val_epoch_losses['hard_dice'] += dice_metric((seg_y_hat.detach() > 0.5).float(), (seg_y.detach() > 0.5).float()).detach().item()
+                for key in val_epoch_losses:
+                    val_epoch_losses[key] /= len(val_loader)
                 if cfg.aux_clf_task:
-                    val_epoch_losses['clf'] += clf_loss.item()
-                    acc, pos_acc, neg_acc = binary_accuracy(clf_y_hat, clf_y)
-                    val_epoch_accuracies['acc'] += acc.item()
-                    val_epoch_accuracies['pos_acc'] += pos_acc.item()
-                    val_epoch_accuracies['neg_acc'] += neg_acc.item()
-
-        for key in val_epoch_losses:
-            val_epoch_losses[key] /= len(val_loader)
-        if cfg.aux_clf_task:
-            for key in val_epoch_accuracies:
-                val_epoch_accuracies[key] /= len(val_loader)
+                    for key in val_epoch_accuracies:
+                        val_epoch_accuracies[key] /= len(val_loader)
 
         print('\n')  # Do this in order to go below the second tqdm line
         if not args.only_eval:
@@ -439,15 +506,26 @@ def main_worker(rank, world_size):
             if cfg.aux_clf_task:
                 print(f'\t[CLF] -> Train Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_losses['clf'], val_epoch_losses['clf']))
 
-            print(f'\t[SEG] -> Train Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_losses['seg'], val_epoch_losses['seg']))
-            print(f'\t[SOFT DICE] -> Train Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_losses['soft_dice'], val_epoch_losses['soft_dice']))
-            print(f'\t[HARD DICE] -> Train Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_losses['hard_dice'], val_epoch_losses['hard_dice']))
+            if not args.mc_dropout:
+                print(f'\t[SEG] -> Train Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_losses['seg'], val_epoch_losses['seg']))
+                print(f'\t[SOFT DICE] -> Train Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_losses['soft_dice'], val_epoch_losses['soft_dice']))
+                print(f'\t[HARD DICE] -> Train Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_losses['hard_dice'], val_epoch_losses['hard_dice']))
+            else:
+                print(f'\t[MC SEG] -> Train Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_losses['seg'], val_epoch_losses_mc['mc_seg']))
+                print(f'\t[MC SOFT DICE] -> Train Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_losses['soft_dice'], val_epoch_losses_mc['mc_soft_dice']))
+                print(f'\t[MC HARD DICE] -> Train Loss: %0.4f | Validation Loss: %0.4f' % (train_epoch_losses['hard_dice'], val_epoch_losses_mc['mc_hard_dice']))
+
         else:
             if cfg.aux_clf_task:
                 print(f'\t[CLF] -> Validation Loss: %0.4f' % val_epoch_losses['clf'])
-            print(f'\t[SEG] -> Validation Loss: %0.4f' % val_epoch_losses['seg'])
-            print(f'\t[SOFT DICE] -> Validation Loss: %0.4f' % val_epoch_losses['soft_dice'])
-            print(f'\t[HARD DICE] -> Validation Loss: %0.4f' % val_epoch_losses['hard_dice'])
+            if not args.mc_dropout:
+                print(f'\t[SEG] -> Validation Loss: %0.4f' % val_epoch_losses['seg'])
+                print(f'\t[SOFT DICE] -> Validation Loss: %0.4f' % val_epoch_losses['soft_dice'])
+                print(f'\t[HARD DICE] -> Validation Loss: %0.4f' % val_epoch_losses['hard_dice'])
+            else:
+                print(f'\t[MC SEG] -> Validation Loss: %0.4f' % val_epoch_losses_mc['mc_seg'])
+                print(f'\t[MC SOFT DICE] -> Validation Loss: %0.4f' % val_epoch_losses_mc['mc_soft_dice'])
+                print(f'\t[MC HARD DICE] -> Validation Loss: %0.4f' % val_epoch_losses_mc['mc_hard_dice'])
 
         if cfg.aux_clf_task and not args.only_eval:
             print(f'\t[CLF] -> Train Accuracy: {train_epoch_accuracies["acc"] * 100:.2f}% | Validation Accuracy: {val_epoch_accuracies["acc"] * 100:.2f}%')
@@ -458,7 +536,9 @@ def main_worker(rank, world_size):
         # NOTE: Let's only perform the test phase when `only_eval` is specified!
         if args.only_eval:
             dataset.train = False
-            dataset.test(model=model, device=device)
+            if args.mc_dropout:
+                enable_dropout(model)   # enabling only dropout for the test phase
+            dataset.test(model=model, device=device, is_mcd=args.mc_dropout, num_mc_samples=args.num_mc_samples)
             exit(0)
 
     # Cleanup DDP if applicable
