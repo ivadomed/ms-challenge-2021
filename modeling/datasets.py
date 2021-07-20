@@ -331,7 +331,7 @@ class MSSeg2Dataset(Dataset):
     def __len__(self):
         return len(self.subvolumes)
 
-    def test(self, model, device):
+    def test(self, model, device, num_mc_samples):
         """Implements the test phase via animaSegPerfAnalyzer"""
         assert model is not None
 
@@ -412,8 +412,16 @@ class MSSeg2Dataset(Dataset):
                     x1 = torch.tensor(ses01_subvolume, dtype=torch.float).view(1, 1, *ses01_subvolume.shape).to(device)
                     x2 = torch.tensor(ses02_subvolume, dtype=torch.float).view(1, 1, *ses02_subvolume.shape).to(device)
 
-                # Get the subvolume prediction
-                seg_y_hat = model(x1, x2).squeeze().detach().cpu().numpy()
+                if num_mc_samples > 0:   # Do Monte Carlo Averaging
+                    seg_y_hats = []
+                    # Forward pass through the network num_mc_samples times and combine them by averaging.
+                    for i_mc in range(num_mc_samples):
+                        seg_y_hats.append(model(x1, x2).squeeze())
+                    seg_y_hats = torch.stack(seg_y_hats)
+                    seg_y_hat = torch.mean(seg_y_hats, dim=0).detach().cpu().numpy()
+                else:    # Get the standard subvolume prediction
+                    seg_y_hat = model(x1, x2).squeeze().detach().cpu().numpy()
+
                 if self.use_patches:
                     seg_y_hat = patches2subvolume(patches=list(seg_y_hat), subvolume_size=self.subvolume_size)
 
