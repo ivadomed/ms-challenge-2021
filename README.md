@@ -15,4 +15,4 @@ python scripts/curate_msseg_challenge_2021.py -d PATH_TO_msseg_challenge_2021_DA
 The preprocessing pipeline for each subject can be found in `/preprocessing`. `preprocessing/README.md` and section 3.2 of our arXiv paper describes this pipeline in detail. You can also check our [quality-control (QC) visualizations](https://github.com/ivadomed/ms-challenge-2021/releases/download/v0.1/qc_registration.gif).
 
 ## Modeling
-All modeling efforts can be found in `/modeling`. `modeing/README.md` and section 3.4 of our arXiv paper describes the deep learning arhictectures used in detail.
+All modeling efforts can be found in `/modeling`. `modeling/README.md` and section 3.4 of our arXiv paper describe the deep learning arhictectures used in detail.
