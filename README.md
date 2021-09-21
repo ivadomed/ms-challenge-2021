@@ -27,7 +27,7 @@ python scripts/curate_msseg_challenge_2021.py -d PATH_TO_msseg_challenge_2021_DA
 The preprocessing pipeline for each subject can be found in `/preprocessing`. `preprocessing/README.md` and section 3.2 of our arXiv paper describes this pipeline in detail. You can also check our [quality-control (QC) visualizations](https://github.com/ivadomed/ms-challenge-2021/releases/download/v0.1/qc_registration.gif). You can find an example preprocessing visualization for a subject below.
 
 <p align="center">
-  <img src="https://github.com/ivadomed/ms-challenge-2021/releases/download/v0.1/qc_registration_sub99.gif" width=400 />
+  <img src="https://github.com/ivadomed/ms-challenge-2021/releases/download/v0.1/qc_registration_sub99.gif" width=600 />
 </p>
 
 ## Modeling
