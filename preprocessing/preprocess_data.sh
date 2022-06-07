@@ -90,6 +90,7 @@ sct_deepseg_sc -i ${file_ses2_onlyfile}_res.nii.gz -c t1 -o ${file_ses2_onlyfile
 
 # Perform registration ses-01 --> ses-02
 # NOTE: We are passing the un-resampled / original ses-01 as the input to avoid double interpolation
+# NOTE: We do NOT need to co-register the brain, because it was ALREADY co-registered by the MS-CHALLENGE team. 
 sct_register_multimodal -i ${file_ses1}.nii.gz -iseg ${file_ses1_onlyfile}_seg.nii.gz -d ${file_ses2_onlyfile}_res.nii.gz -dseg ${file_ses2_onlyfile}_seg.nii.gz -o ${file_ses1_onlyfile}_reg.nii.gz -param step=1,type=seg,algo=slicereg,metric=MeanSquares,smooth=3
 
 # Dilate spinal cord mask
