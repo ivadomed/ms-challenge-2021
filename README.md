@@ -32,3 +32,8 @@ The preprocessing pipeline for each subject can be found in `preprocessing/`. `p
 
 ## Modeling
 All modeling efforts can be found in `modeling/`. `modeling/README.md` and section 3.4 of our arXiv paper describe the deep learning architectures used in detail.
+
+## Internal use at NeuroPoly
+
+Location of the data:
+- `git+ssh://data.neuro.polymtl.ca:msseg_challenge_2021` --> this is the BIDS-converted dataset.
