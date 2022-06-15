@@ -3,10 +3,10 @@
 # Preprocess data.
 #
 # Dependencies:
-# - bet2 (FSL) <TODO: VERSION>
-# - SCT <TODO: VERSION>
-# - ANTs <TODO: VERSION>
-# - animaBrainExtraction (anima) <TODO: VERSION>
+# - FSL (includes bet2): 5.0.11
+# - SCT: 5.3.0
+# - ANIMA (includes animaBrainExtraction): 4.0.1
+# - ANTs: 2.2.0
 #
 # Usage:
 #   ./preprocess_data.sh <SUBJECT> <BRAIN_EXTRACTION_METHOD>
@@ -80,9 +80,9 @@ file_ses1="ses-01/anat/${SUBJECT}_ses-01_FLAIR"
 file_ses2_onlyfile="${SUBJECT}_ses-02_FLAIR"
 file_ses2="ses-02/anat/${SUBJECT}_ses-02_FLAIR"
 
-# Resample both sessions to isotropic 0.5mm x 0.5mm x 0.5mm voxel dimensions
-flirt -in ${file_ses1}.nii.gz -ref ${file_ses1}.nii.gz -applyisoxfm 0.5 -nosearch -out ${file_ses1_onlyfile}_res.nii.gz
-flirt -in ${file_ses2}.nii.gz -ref ${file_ses2}.nii.gz -applyisoxfm 0.5 -nosearch -out ${file_ses2_onlyfile}_res.nii.gz
+# Resample both sessions to isotropic 0.75mm x 0.75mm x 0.75mm voxel dimensions
+flirt -in ${file_ses1}.nii.gz -ref ${file_ses1}.nii.gz -applyisoxfm 0.75 -nosearch -out ${file_ses1_onlyfile}_res.nii.gz
+flirt -in ${file_ses2}.nii.gz -ref ${file_ses2}.nii.gz -applyisoxfm 0.75 -nosearch -out ${file_ses2_onlyfile}_res.nii.gz
 
 # Spinal cord extraction
 sct_deepseg_sc -i ${file_ses1_onlyfile}_res.nii.gz -c t1 -o ${file_ses1_onlyfile}_seg.nii.gz
@@ -157,12 +157,12 @@ file_gt4="ses-02/anat/${SUBJECT}_ses-02_FLAIR_lesion-manual-rater4"
 file_gtc_onlyfile="${SUBJECT}_ses-02_FLAIR_seg-lesion"
 file_gtc="ses-02/anat/${SUBJECT}_ses-02_FLAIR_seg-lesion"
 
-# Resample segmentation GTs to isotropic 0.5mm x 0.5mm x 0.5mm voxel dimensions
-flirt -in ${file_gt1}.nii.gz -ref ${file_gt1}.nii.gz -applyisoxfm 0.5 -nosearch -out ${file_gt1_onlyfile}_res.nii.gz
-flirt -in ${file_gt2}.nii.gz -ref ${file_gt2}.nii.gz -applyisoxfm 0.5 -nosearch -out ${file_gt2_onlyfile}_res.nii.gz
-flirt -in ${file_gt3}.nii.gz -ref ${file_gt3}.nii.gz -applyisoxfm 0.5 -nosearch -out ${file_gt3_onlyfile}_res.nii.gz
-flirt -in ${file_gt4}.nii.gz -ref ${file_gt4}.nii.gz -applyisoxfm 0.5 -nosearch -out ${file_gt4_onlyfile}_res.nii.gz
-flirt -in ${file_gtc}.nii.gz -ref ${file_gtc}.nii.gz -applyisoxfm 0.5 -nosearch -out ${file_gtc_onlyfile}_res.nii.gz
+# Resample segmentation GTs to isotropic 0.75mm x 0.75mm x 0.75mm voxel dimensions
+flirt -in ${file_gt1}.nii.gz -ref ${file_gt1}.nii.gz -applyisoxfm 0.75 -nosearch -out ${file_gt1_onlyfile}_res.nii.gz
+flirt -in ${file_gt2}.nii.gz -ref ${file_gt2}.nii.gz -applyisoxfm 0.75 -nosearch -out ${file_gt2_onlyfile}_res.nii.gz
+flirt -in ${file_gt3}.nii.gz -ref ${file_gt3}.nii.gz -applyisoxfm 0.75 -nosearch -out ${file_gt3_onlyfile}_res.nii.gz
+flirt -in ${file_gt4}.nii.gz -ref ${file_gt4}.nii.gz -applyisoxfm 0.75 -nosearch -out ${file_gt4_onlyfile}_res.nii.gz
+flirt -in ${file_gtc}.nii.gz -ref ${file_gtc}.nii.gz -applyisoxfm 0.75 -nosearch -out ${file_gtc_onlyfile}_res.nii.gz
 
 # Apply the brain + SC mask to the final forms of all segmentation GTs
 fslmaths ${file_gt1_onlyfile}_res.nii.gz -mas $PATH_DATA_PROCESSED/$SUBJECT/brain_cord_mask.nii.gz ${file_gt1_onlyfile}_res_masked.nii.gz
