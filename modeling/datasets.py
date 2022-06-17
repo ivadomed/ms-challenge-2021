@@ -201,11 +201,11 @@ class MSSeg2Dataset(Dataset):
 
         for subject_no, subject in enumerate(tqdm(subjects, desc='Loading Volumes -> Preparing Subvolumes')):
             # Read-in input volumes
-            ses01 = nib.load(os.path.join(root, subject, 'anat', '%s_FLAIR.nii.gz' % subject))
-            ses02 = nib.load(os.path.join(root, subject, 'anat', '%s_T1w.nii.gz' % subject))
+            ses01 = nib.load(os.path.join(root, subject, 'anat', '%s_FLAIR.nii.gz' % subject), mmap=False)
+            ses02 = nib.load(os.path.join(root, subject, 'anat', '%s_T1w.nii.gz' % subject), mmap=False)
 
             # Read-in GT volumes (using the consensus GT for now)
-            gtc = nib.load(os.path.join(root, 'derivatives', 'labels', subject, 'anat', '%s_FLAIR_seg-lesion.nii.gz' % subject))
+            gtc = nib.load(os.path.join(root, 'derivatives', 'labels', subject, 'anat', '%s_FLAIR_seg-lesion.nii.gz' % subject), mmap=False)
 
             # Check if image sizes and resolutions match
             assert ses01.shape == ses02.shape == gtc.shape
@@ -359,11 +359,11 @@ class MSSeg2Dataset(Dataset):
 
         for subject_no, subject in enumerate(tqdm(self.subjects_hold_out, desc='Testing Phase')):
             # Read-in input test volumes
-            ses01 = nib.load(os.path.join(self.root, subject, 'anat', '%s_FLAIR.nii.gz' % subject))
-            ses02 = nib.load(os.path.join(self.root, subject, 'anat', '%s_T1w.nii.gz' % subject))
+            ses01 = nib.load(os.path.join(self.root, subject, 'anat', '%s_FLAIR.nii.gz' % subject), mmap=False)
+            ses02 = nib.load(os.path.join(self.root, subject, 'anat', '%s_T1w.nii.gz' % subject), mmap=False)
 
             # Read-in GT volumes (using the consensus GT for now)
-            gtc = nib.load(os.path.join(self.root, 'derivatives', 'labels', subject, 'anat', '%s_FLAIR_seg-lesion.nii.gz' % subject))
+            gtc = nib.load(os.path.join(self.root, 'derivatives', 'labels', subject, 'anat', '%s_FLAIR_seg-lesion.nii.gz' % subject), mmap=False)
 
             # Check if image sizes and resolutions match
             assert ses01.shape == ses02.shape == gtc.shape
@@ -582,14 +582,14 @@ class MSSeg1Dataset(Dataset):
 
         for subject_no, subject in enumerate(tqdm(subjects, desc='Loading Volumes -> Preparing Subvolumes')):
             # Read-in input volumes
-            ses01 = nib.load(os.path.join(root, subject, 'anat', '%s_FLAIR.nii.gz' % subject))
+            ses01 = nib.load(os.path.join(root, subject, 'anat', '%s_FLAIR.nii.gz' % subject), mmap=False)
 
             # Read-in GT volumes
             gt = None
             if gt_type == 'staple':
-                gt = nib.load(os.path.join(root, 'derivatives', 'labels', subject, 'anat', '%s_FLAIR_seg-lesion0.nii.gz' % subject))
+                gt = nib.load(os.path.join(root, 'derivatives', 'labels', subject, 'anat', '%s_FLAIR_seg-lesion0.nii.gz' % subject), mmap=False)
             elif gt_type == 'average':
-                gt = nib.load(os.path.join(root, 'derivatives', 'labels', subject, 'anat', '%s_FLAIR_seg-average-lesion.nii.gz' % subject))
+                gt = nib.load(os.path.join(root, 'derivatives', 'labels', subject, 'anat', '%s_FLAIR_seg-average-lesion.nii.gz' % subject), mmap=False)
             else:
                 raise NotImplementedError('gt_type=%s is not yet implemented!')
 
