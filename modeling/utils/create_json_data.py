@@ -7,6 +7,10 @@ import random
 import numpy as np
 from fold_generator import FoldGenerator
 
+# Code for creating "k" json files containing the respective dataset splits for k-fold cross validation 
+# Usage:
+# python create_json_data.py -se 30 -ncv 5 -dr <root path of the dataset>
+# Creates "k" files named `dataset_fold-{X}.json` inside the root dataset folder
 
 root = "/home/GRAMES.POLYMTL.CA/u114716/duke/temp/muena/ms-challenge-2021_preprocessed/data_processed_clean"
 
