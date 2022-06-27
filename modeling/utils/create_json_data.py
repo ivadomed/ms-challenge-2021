@@ -7,11 +7,6 @@ import random
 import numpy as np
 from fold_generator import FoldGenerator
 
-# Code for creating "k" json files containing the respective dataset splits for k-fold cross validation 
-# Usage:
-# python create_json_data.py -se 30 -ncv 5 -dr <root path of the dataset>
-# Creates "k" files named `dataset_fold-{X}.json` inside the root dataset folder
-
 root = "/home/GRAMES.POLYMTL.CA/u114716/duke/temp/muena/ms-challenge-2021_preprocessed/data_processed_clean"
 
 parser = argparse.ArgumentParser(description='Code for creating k-fold splits of the ms-challenge-2021 dataset.')
@@ -103,7 +98,7 @@ for fold in range(num_cv_folds):
         params[name] = temp_list
 
 
-    # run separte loop for testing "without" the labels
+    # run separte loop for testing
     for name, subs_list in test_subjects_dict.items():
         temp_list = []
         for subject_no, subject in enumerate(tqdm(subs_list, desc='Loading Volumes')):
@@ -114,10 +109,14 @@ for fold in range(num_cv_folds):
             ses01_flair = os.path.join(args.data_root, subject, 'ses-01', 'anat', '%s_ses-01_FLAIR.nii.gz' % subject)
             ses02_flair = os.path.join(args.data_root, subject, 'ses-02', 'anat', '%s_ses-02_FLAIR.nii.gz' % subject)
 
+            # Read-in GT volumes (using the consensus GT for now)
+            gtc = os.path.join(args.data_root, 'derivatives', 'labels', subject, 'ses-02', 'anat', '%s_ses-02_FLAIR_seg-lesion.nii.gz' % subject)
+
             # store in a temp dictionary
             temp_data["image_ses1"] = ses01_flair.replace(args.data_root+"/", '') # .strip(root)
             temp_data["image_ses2"] = ses02_flair.replace(args.data_root+"/", '') # .strip(root)
-                
+            temp_data["label_c"] = gtc.replace(args.data_root+"/", '')       # .strip(root)
+
             temp_list.append(temp_data)
         
         params[name] = temp_list
