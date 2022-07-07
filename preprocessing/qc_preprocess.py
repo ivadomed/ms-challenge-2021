@@ -6,7 +6,7 @@ See `preprocess_data.sh` for the preprocessing pipeline.
 import argparse
 import os
 from tqdm import tqdm
-import imageio
+import imageio.v2 as imageio
 
 import pandas as pd
 import nibabel as nib
@@ -133,10 +133,10 @@ for subject in tqdm(subjects, desc='Iterating over Subjects'):
             ses02_res_masked_fpath = os.path.join(qc_subject_path, '%s_ses-02_FLAIR_res_qcmasked.nii.gz' % subject)
 
             # Apply the brain + SC mask
-            fsl_mask_cmd = 'fslmaths %s -mas %s %s'
-            os.system(fsl_mask_cmd % (ses01_res_fpath, mask_fpath, ses01_res_masked_fpath))
-            os.system(fsl_mask_cmd % (ses01_reg_fpath, mask_fpath, ses01_reg_masked_fpath))
-            os.system(fsl_mask_cmd % (ses02_res_fpath, mask_fpath, ses02_res_masked_fpath))
+            sct_mask_cmd = 'sct_maths -i %s -mul %s -o %s -v 0'
+            os.system(sct_mask_cmd % (ses01_res_fpath, mask_fpath, ses01_res_masked_fpath))
+            os.system(sct_mask_cmd % (ses01_reg_fpath, mask_fpath, ses01_reg_masked_fpath))
+            os.system(sct_mask_cmd % (ses02_res_fpath, mask_fpath, ses02_res_masked_fpath))
 
             # Generate visualizations for each image file with display range as [min, max]
             fsl_render_cmd = 'fsleyes render -of %s %s -dr %0.2f %0.2f'
