@@ -6,7 +6,7 @@ See `preprocess_data.sh` for the preprocessing pipeline.
 import argparse
 import os
 from tqdm import tqdm
-import imageio
+import imageio.v2 as imageio
 
 import pandas as pd
 import nibabel as nib
@@ -31,6 +31,9 @@ else:
         raise NotADirectoryError('`data_processed` could NOT be found within %s' % args.sct_output_path)
     if not os.path.exists(os.path.join(args.sct_output_path, 'qc')):
         raise NotADirectoryError('`qc` could NOT be found within %s' % args.sct_output_path)
+
+# Set environment variable for off-screen rendering with FSLeyes
+os.environ['PYOPENGL_PLATFORM'] = 'osmesa'
 
 # Get all subjects
 subjects_df = pd.read_csv(os.path.join(args.sct_output_path, 'data_processed', 'participants.tsv'), sep='\t')
@@ -82,8 +85,8 @@ for subject in tqdm(subjects, desc='Iterating over Subjects'):
     if not ses01_res.shape == ses01_reg.shape == ses02_res.shape == mask.shape == gtc_res.shape:
         raise ValueError('Shape mismatch in sessions and GTs for subject: %s' % subject)
 
-    # (3) Check if isotropic-sampling worked as expected: voxel dim should be 0.5mm x 0.5mm x 0.5mm
-    if not all([x.header['pixdim'].tolist()[1:4] == [0.5, 0.5, 0.5] for x in (ses01_res, ses01_reg, ses02_res, mask, gtc_res)]):
+    # (3) Check if isotropic-sampling worked as expected: voxel dim should be 0.75mm x 0.75mm x 0.75mm
+    if not all([x.header['pixdim'].tolist()[1:4] == [0.75, 0.75, 0.75] for x in (ses01_res, ses01_reg, ses02_res, mask, gtc_res)]):
         raise ValueError('Non-isotropic voxel dimensions observed for subject: %s' % subject)
 
     # (4) Check if the brain + SC mask leaves out any lesions from GTs (every expert and consensus)
@@ -130,10 +133,10 @@ for subject in tqdm(subjects, desc='Iterating over Subjects'):
             ses02_res_masked_fpath = os.path.join(qc_subject_path, '%s_ses-02_FLAIR_res_qcmasked.nii.gz' % subject)
 
             # Apply the brain + SC mask
-            fsl_mask_cmd = 'fslmaths %s -mas %s %s'
-            os.system(fsl_mask_cmd % (ses01_res_fpath, mask_fpath, ses01_res_masked_fpath))
-            os.system(fsl_mask_cmd % (ses01_reg_fpath, mask_fpath, ses01_reg_masked_fpath))
-            os.system(fsl_mask_cmd % (ses02_res_fpath, mask_fpath, ses02_res_masked_fpath))
+            sct_mask_cmd = 'sct_maths -i %s -mul %s -o %s -v 0'
+            os.system(sct_mask_cmd % (ses01_res_fpath, mask_fpath, ses01_res_masked_fpath))
+            os.system(sct_mask_cmd % (ses01_reg_fpath, mask_fpath, ses01_reg_masked_fpath))
+            os.system(sct_mask_cmd % (ses02_res_fpath, mask_fpath, ses02_res_masked_fpath))
 
             # Generate visualizations for each image file with display range as [min, max]
             fsl_render_cmd = 'fsleyes render -of %s %s -dr %0.2f %0.2f'
@@ -148,7 +151,7 @@ for subject in tqdm(subjects, desc='Iterating over Subjects'):
 
         # If not applying the VOI mask, simply overlay the masks in red color for each session
         else:
-            fsl_render_cmd = 'fsleyes render -of %s %s -dr %0.2f %0.2f %s -dr 0 1 -a 30 -cm red'
+            fsl_render_cmd = 'fsleyes render -of %s %s %s -dr %0.2f %0.2f -a 30 -cm red'
             os.system(fsl_render_cmd % (ses01_viz_fpath, ses01_res_fpath, mask_fpath, ses01_res_min, ses01_res_max))
             os.system(fsl_render_cmd % (ses01_reg_viz_fpath, ses01_reg_fpath, mask_fpath, ses01_reg_min, ses01_reg_max))
             os.system(fsl_render_cmd % (ses02_viz_fpath, ses02_res_fpath, mask_fpath, ses02_res_min, ses02_res_max))
